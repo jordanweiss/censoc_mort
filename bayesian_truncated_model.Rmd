@@ -1,0 +1,191 @@
+---
+title: "Simple Gompertzian Mortality Model with Truncation"
+author: "Maria Osborne / Leslie Root"
+output: html_notebook
+---
+
+# Imports
+
+```{r}
+library(rstan)
+library(flexsurv)
+library(tidyverse)
+source('gompertz_functions.R')
+```
+
+
+# Truncation attempt 1
+
+The Stan User's Guide has a section on truncated data, and it makes it sound pretty easy! https://mc-stan.org/docs/2_22/stan-users-guide/truncated-data-section.html (Spoiler: it's not that easy.)
+
+The first thing we can try is to simply add T[L,U] (Truncated [Lower,Upper]) to the model specification, and terms for L and U in the data block (since we know exactly where the truncation occurs, it's data, not parameters). This lets Stan know that our distribution is truncated. The lines I modified are marked "<-- modified"; all the rest is Maria's code.
+
+```{r}
+simple_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_log(vector x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    int len = num_elements(x);
+    vector[len] probs;
+    real log_like;
+    for (i in 1:len) {
+      probs[i] = alpha * exp(beta*x[i]) * exp((-alpha/beta) * (exp(beta*x[i])-1)); 
+    }
+    log_like = sum(log(probs));
+    return log_like;
+  }
+}
+
+data {
+  int N;         // number of observations
+  vector[N] x;   // observed ages at death
+  real L;       // lower truncation bound <-- modified
+  real U;       // upper truncation bound <-- modified
+}
+
+parameters {
+  real<lower=0> mode;       // modal age at death param
+  real<lower=0.001> beta;   // 'force of mortality' param
+}
+
+model {
+  x ~ gompertz(mode, beta) T[L,U];      // likelihood of observing this age at death, given mode and beta <-- modified
+  mode ~ uniform(20, 50);        // prior for m
+  beta ~ uniform(0.001, 0.3);    // prior for beta
+}
+"
+
+
+# Initialize the parameters to some reasonable values, otherwise
+# stan may attempt to take log likelihood of non-positive values
+init_gomp <- function () {list(beta=0.05, mode=35)} 
+
+# compiling the model takes minute or two
+simple_gomp_model = stan_model(model_code = simple_model_text,
+                   model_name='gomp')
+```
+
+The error this throws is "Outcomes in truncated distributions must be univariate.
+  Found outcome expression: x
+  with non-univariate type: vector" 
+
+So, a truncated distribution cannot be vectorized. Fortunately there's a pretty easy fix online - https://discourse.mc-stan.org/t/question-about-vectorized-truncated-likelihood/6272 You just have to chuck the model specification into a for-loop instead of having x specified as a vector. Let's try that.
+
+Again, the line that has been modified is labeled "<-- modified" - everything else is the same as the code chunk above.
+
+```{r}
+simple_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_log(vector x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    int len = num_elements(x);
+    vector[len] probs;
+    real log_like;
+    for (i in 1:len) {
+      probs[i] = alpha * exp(beta*x[i]) * exp((-alpha/beta) * (exp(beta*x[i])-1)); 
+    }
+    log_like = sum(log(probs));
+    return log_like;
+  }
+}
+
+data {
+  int N;         // number of observations
+  vector[N] x;   // observed ages at death
+  real L;       // lower truncation bound
+  real U;       // upper truncation bound
+}
+
+parameters {
+  real<lower=0> mode;       // modal age at death param
+  real<lower=0.001> beta;   // 'force of mortality' param
+}
+
+model {
+    for (i in 1:N) {
+x[i] ~ gompertz(mode, beta) T[L,U];    
+      }  // likelihood of observing this age at death, given mode and beta <-- modified
+  mode ~ uniform(20, 50);        // prior for m
+  beta ~ uniform(0.001, 0.3);    // prior for beta
+}
+"
+
+
+# Initialize the parameters to some reasonable values, otherwise
+# stan may attempt to take log likelihood of non-positive values
+init_gomp <- function () {list(beta=0.05, mode=35)} 
+
+# compiling the model takes minute or two
+simple_gomp_model = stan_model(model_code = simple_model_text,
+                   model_name='gomp')
+```
+
+This time it says:
+
+No matches for: real ~ gompertz(real, real). Available argument signatures for gompertz: vector ~ gompertz(real, real). 
+
+So it is not expecting x[i] on the left side of the equation x[i] ~ gompertz(mode, beta) T[L,U] - it wants x, the vector itself. But as we saw above, that doesn't work with the truncation. This is where I get stuck! It seems like we need to make "real" an available argument signature for gompertz. Would it help to turn x in the gompertz_log function into a real number instead of a vector? I think it might, but I can't figure out how to un-vectorize that chunk.
+
+# Testing the model with generated data
+```{r}
+set.seed(20)
+
+n <- 20000
+beta_actual <-  1/12
+mode_actual <- 45
+death_ages <- rgomp_mode(n = n, M = mode_actual, beta = beta_actual)
+
+
+# visualization to make sure I got the PDF correct...
+hist(death_ages, breaks=seq(0,75,1), freq=FALSE, col = 'gray', border='darkgray')
+
+alpha_actual <- getAlpha(M = mode_actual, beta = beta_actual)
+curve(alpha_actual * exp(beta_actual*x) * exp((-alpha_actual/beta_actual) * (exp(beta_actual*x)-1)), 
+      from=0, to=80, add=TRUE, col = 'red')
+
+```
+
+Note that once we get the truncation to work, we should be able to do this - add L and U specs into our stan data list and then just proceed as usual:
+
+# Run the model (can take a couple minutes depending on how big N is)
+```{r}
+simple_stan_data = list(x = death_ages, N = length(death_ages), L = 65, U = 100)
+
+# Generate the stan fit object
+simple_fit =  sampling(object = simple_gomp_model, 
+                 data = simple_stan_data, 
+                 init = init_gomp,
+                 chains = 2,
+                 iter   = 1000, 
+                 warmup = 200)
+```
+
+
+
+# Posterior checks
+```{r}
+# summary, credible intervals
+print(simple_fit, probs= c(0.025, 0.5, .975), digits=3)
+
+# make sure the chains converged
+traceplot(simple_fit)
+
+# quick visual check to make sure the real parameters are in the credible interval
+stan_hist(simple_fit, pars='mode', fill='coral', color='darkgray') +
+  geom_vline(xintercept=mode_actual, linetype='dotdash')
+stan_hist(simple_fit, pars='beta', fill='lightblue', color='darkgray') +
+  geom_vline(xintercept=beta_actual, linetype='dotdash')
+```
+
+
+

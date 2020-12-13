@@ -1,0 +1,180 @@
+---
+title: "Simple Gompertzian Mortality Model"
+---
+# Imports
+
+```{r}
+library(rstan)
+library(flexsurv)
+library(tidyverse)
+library(cowplot)
+source('gompertz_functions.R')
+```
+
+
+
+# The Basic Model
+
+mode and beta parameters, non-truncated data, relatively uninformative priors
+
+```{r}
+simple_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_log(vector x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    int len = num_elements(x);
+    vector[len] probs;
+    real log_like;
+    for (i in 1:len) {
+      probs[i] = alpha * exp(beta*x[i]) * exp((-alpha/beta) * (exp(beta*x[i])-1)); 
+    }
+    log_like = sum(log(probs));
+    return log_like;
+  }
+}
+
+data {
+  int N;         // number of observations
+  vector[N] x;   // observed ages at death
+}
+
+parameters {
+  real<lower=0> mode;       // modal age at death param
+  real<lower=0.001> beta;   // 'force of mortality' param
+}
+
+model {
+  x ~ gompertz(mode, beta);      // likelihood of observing this age at death, given mode and beta
+  mode ~ uniform(20, 100);        // prior for m
+  beta ~ uniform(0.001, 0.3);    // prior for beta
+}
+"
+
+
+# Initialize the parameters to some reasonable values, otherwise
+# stan may attempt to take log likelihood of non-positive values
+init_gomp <- function () {list(beta=0.05, mode=35)} 
+
+# compiling the model takes minute or two
+simple_gomp_model = stan_model(model_code = simple_model_text,
+                   model_name='gomp')
+```
+
+
+# Testing the model with generated data
+```{r}
+set.seed(20)
+
+n <- 1000
+beta_actual <-  1/12
+mode_actual <- 70
+death_ages <- rgomp_mode(n = n, M = mode_actual, beta = beta_actual)
+
+
+# visualization to make sure I got the PDF correct...
+hist(death_ages, breaks=seq(0,110,1), freq=FALSE, col = 'gray', border='darkgray')
+
+alpha_actual <- getAlpha(M = mode_actual, beta = beta_actual)
+curve(alpha_actual * exp(beta_actual*x) * exp((-alpha_actual/beta_actual) * (exp(beta_actual*x)-1)), 
+      from=0, to=80, add=TRUE, col = 'red')
+```
+
+# Run the model (can take a couple minutes depending on how big N is)
+```{r}
+death_ages <- rgomp_mode(n = n, M = mode_actual, beta = beta_actual)
+
+simple_stan_data = list(x = death_ages, N = length(death_ages))
+
+# Generate the stan fit object
+simple_fit =  sampling(object = simple_gomp_model, 
+                 data = simple_stan_data, 
+                 init = init_gomp,
+                 chains = 2,
+                 iter   = 2000, 
+                 warmup = 200)
+```
+
+
+
+# Posterior checks
+```{r}
+# summary, credible intervals
+print(simple_fit, probs= c(0.025, 0.5, .975), digits=3)
+
+# make sure the chains converged
+traceplot(simple_fit)
+
+# quick visual check to make sure the real parameters are in the credible interval
+stan_hist(simple_fit, pars='mode', fill='coral', color='darkgray') +
+  geom_vline(xintercept=mode_actual, linetype='dotdash')
+
+stan_hist(simple_fit, pars='beta', fill='lightblue', color='darkgray') +
+  geom_vline(xintercept=beta_actual, linetype='dotdash') 
+```
+
+## Simulation check
+
+```{r}
+results <- list()
+n <- 1000
+beta_actual <-  1/12
+mode_actual <- 70
+death_ages <- rgomp_mode(n = n, M = mode_actual, beta = beta_actual)
+
+for (i in 1:1000) {
+death_ages <- rgomp_mode(n = n, M = mode_actual, beta = beta_actual)
+
+simple_stan_data = list(x = death_ages, N = length(death_ages))
+
+# Generate the stan fit object
+simple_fit =  sampling(object = simple_gomp_model, 
+                 data = simple_stan_data, 
+                 init = init_gomp,
+                 chains = 2,
+                 iter   = 2000, 
+                 warmup = 200, refresh=0)
+
+mode <- mean(rstan::extract(simple_fit)$mode)
+beta <- mean(rstan::extract(simple_fit)$beta)
+
+cat("iteration = ", i, "\n")
+
+results[[i]] <- tibble(mode, beta)
+}
+
+simulation_results <- bind_rows(results)
+
+mode_plot <- simulation_results %>% 
+  ggplot() +
+  geom_histogram(aes(x = mode), fill = "grey", color = "black")+ 
+  theme_minimal_grid(15) +
+  geom_vline(aes(xintercept = 70, colour="True"), size = 1) + 
+  geom_vline(aes(xintercept = mean(mode), color='Estimated'), size = 1) + 
+  labs(title = "Simulation Results",
+       subtitle = "R = 1,000; N = 1,000",
+       x = "Mode",
+       y = "Count") +
+  scale_color_manual(name = "", values = c("True" = "blue", "Estimated" = "red")) + 
+  theme(legend.position = "bottom")
+
+beta_plot <- simulation_results %>% 
+  ggplot() +
+  geom_histogram(aes(x = beta), fill = "grey", color = "black")+ 
+  theme_minimal_grid(15) +
+  geom_vline(aes(xintercept = 1/12, colour="True"), size = 1) + 
+  geom_vline(aes(xintercept = mean(beta), color='Estimated'), size = 1) + 
+  labs(title = "Simulation Results",
+            subtitle = "R = 1,000; N = 1,000",
+       x = "Beta",
+       y = "Count") +
+  scale_color_manual(name = "", values = c("True" = "blue", "Estimated" = "red")) + 
+  theme(legend.position = "bottom")
+
+plot_grid(mode_plot, beta_plot)
+```
+

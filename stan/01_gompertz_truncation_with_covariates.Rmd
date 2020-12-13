@@ -1,0 +1,388 @@
+---
+title: "Bayesian Gompertz model that handles both truncation and covariates"
+author: Maria O
+---
+
+# Imports
+```{r, eval = F}
+library(rstan)
+library(flexsurv)
+library(tidyverse)
+library(bayesplot)
+library(rstanarm)
+library(gridExtra)
+library(cowplot)
+
+source("../gompertz_functions.R")
+options(mc.cores = 4)
+```
+
+
+# How the model works
+We assume a proportional hazards model. Each person $i$ has $k$ predictor variables
+
+$$
+h_i(x) = \alpha \times \exp\bigg(\beta x + \sum_{j=1}^k b_j c_j \bigg)
+$$
+where
+
+$$
+\alpha \times \exp{\beta x_i} \ \text{ is the baseline Gompertzian hazard at age } x \\
+\exp\bigg(\sum_{j=1}^k b_j c_j \bigg) \ \text{are the effects of each covariate} \ c_j \ \text{mutliplied by coefficient} \ b_j
+$$
+
+Input data: An vector $\mathbf{x}$ of $N$ observed death ages, an $N$ by $K$ matrix of covariates, two constants: U and L denoting upper and lower age limits. (All one-dimensional vectors are actually column vectors to Stan, so I am writing their transposes.)
+
+\begin{equation}
+L, U \in \mathbb{Z}^+ \\
+
+\mathbf{x}^T = [x_1, x_2, .... , x_n] \\
+
+\textbf{C} =
+\begin{bmatrix}
+    c_{11}       & c_{12}  & \dots & c_{1k} \\
+    c_{21}       & c_{22}  & \dots & c_{2k} \\
+    \ \vdots & \vdots  & \ddots & \vdots \\
+    c_{n1}       & c_{n2}  & \dots & c_{nk}
+\end{bmatrix} \\
+\end{equation}
+
+
+And these are the parameters we estimate:
+
+$$
+\mathbf{b}^T = [ b_1, b_2, ... b_k ] \\
+M \ \text{(modal age at death in baseline Gompertz schedule)} \\
+\beta \ \text{(mortality parameter in baseline Gompertz schedule)}
+$$
+
+Notes that what we get OUT of the model is parameterized with $M$ rather than $\alpha$. The internal workings of the model compute $\alpha$ but the user only has to worry about $M$, as it is easier to put a prior on $M$.(is it possible to parameterize everything in terms of the mode rather than alpha? would be less computationally expensive...)
+
+Compute the likelihoods...
+
+$$
+h(x_i|\alpha, \beta, \mathbf{b} )= \alpha \times \exp (\beta x_i) \times \exp (\textbf{C}_{i} \cdot \mathbf{b} )
+$$
+
+for the purpose of typing fewer things define:
+
+$$
+q := \alpha \times \exp (\textbf{C}_{i} \cdot \vec{b} ) \\
+h(x_i|q, \beta)= q \times \exp (\beta x_i)
+$$
+
+Additionally, we presume that the data observed are only gathered from part of the distribution, bounded by ages L and U.
+
+$$
+\mathcal{L}(q, \beta |x) = \prod_{i=1}^N {f(x_i|q,\beta) \over F(U|q,\beta)-F(L|q,\beta)} \\ 
+
+
+
+\log \mathcal{L}(q, \beta |x) = \sum_{i=1}^N \log \bigg[{f(x_i|q,\beta) \over F(x_{max}|q,\beta)-F(x_{min}|q,\beta)}\bigg]
+$$
+
+where $f(x_i)$ is the PDF of the death distribution:
+$$
+f(x_i|q,\beta) = q \times \exp\bigg( {q \over \beta}\big(\exp{(\beta x_i)}-1\big)    \bigg)
+$$
+and $F(x_i)$ the CDF:
+$$
+F(x_i|q,\beta)= 1- \exp\bigg(- {q \over \beta}\big(\exp{(\beta x_i)}-1\big)    \bigg)
+$$
+Since $x_{min}$ and $x_{max}$ are set, 
+$$
+F(U|q,\beta)-F(L|q,\beta) = \exp \bigg( -{q \over \beta} (e^{\beta L}-1) \bigg) - \exp \bigg( -{q \over \beta}(e^{\beta U}-1) \bigg)
+$$
+*(holy inconsistent notation, batman)*
+
+# Model text
+```{r, eval = F}
+trunc_mv_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+  
+  real get_pgomp_between(int U, int L, real mutliplier, real beta) {
+    real denom = exp((-mutliplier/beta) * (exp(beta*L) -1 )) - exp((-mutliplier/beta) * (exp(beta*U) -1 ));
+    return(denom);
+  }
+
+  real gompertz_log(vector x, matrix c, int U, int L, real mode, real beta, vector b){
+    real alpha = get_alpha(mode, beta);
+    int len = num_elements(x);
+    vector[len] probs;
+    real multiplier;
+    real num;
+    real denom;
+    real log_like;
+    for (i in 1:len) {
+      multiplier = alpha * exp(dot_product(c[i], b));
+      num = multiplier * exp(beta*x[i]) * exp((-multiplier/beta) * (exp(beta*x[i])-1)); 
+      denom = get_pgomp_between(U, L, multiplier, beta);
+      probs[i] = num/denom;
+    }
+    log_like = sum(log(probs));
+    return log_like;
+  }
+}
+
+data {
+  int N;           // number of observations
+  int K;           // number of predictors
+  int U;           // upper age of death observed
+  int L;           // lowest age of death observed
+  matrix[N,K] c;   // predictor matrix
+  vector[N] x;     // observed ages at death
+}
+
+parameters {
+  real<lower=0> mode;       // modal age at death param
+  real<lower=0> beta;       // 'force of mortality' param
+  vector[K] b;              // coefficients
+}
+
+model {
+  x ~ gompertz(c, U, L, mode, beta, b);     // likelihood of observing this age at death, given parameters
+  mode ~ uniform(30, 100);                   // prior for mode
+  beta ~ uniform(0.001, 0.3);               // prior for beta
+  b ~ uniform(-2,2);                        // priors for b vector -- all the same for simplicity
+}
+"
+
+trunc_mv_gomp_model = stan_model(model_code = trunc_mv_model_text,
+                   model_name='gompertz with truncation, covariates')
+```
+
+do i actually need to declare all those varaiables before they are computed in the _log function??
+
+
+# Trying it out on some fake data
+using one nominal and one continuous variable.
+
+```{r, eval = F}
+set.seed(50)
+n <- 100000
+
+# real baseline gompertz parameters
+beta_actual <-  1/12
+mode_actual <- 45
+alpha_actual <- getAlpha(M=mode_actual, beta=beta_actual)
+
+# fake covariates
+cont_var_vec <- rnorm(n=n) #contiunous, random from normal(0,1)
+b_cont_actual <- 0.5
+nom_var_vec <- rbinom(n=n, size=1, prob=0.5) #dummy variable, assigned from binomial with p=50% 
+b_nom_actual <- -0.4
+
+# generate death ages
+death_ages_with_cv <- rgompertz(n=n,
+                                shape=beta_actual,
+                                rate=alpha_actual*exp(b_cont_actual*cont_var_vec)*exp(b_nom_actual*nom_var_vec) )
+
+# add truncation to get *observed* deaths
+lowest_age <- 35
+highest_age <- 70
+death_ages_with_cv_trunc <- death_ages_with_cv[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+
+hist(death_ages_with_cv, col='gray', border='darkgray', breaks=seq(0,90,1))
+hist(death_ages_with_cv_trunc, col='red', border='darkgray', breaks=seq(0,90,1), add=T)
+curve(n*alpha_actual * exp(beta_actual*x) * exp((-alpha_actual/beta_actual) * (exp(beta_actual*x)-1)), 
+      from=0, to=85, add=TRUE, col = 'darkblue', lty=2, lwd=2)
+```
+Dashed Line: Baseline Gompertz(alpha, beta) distribution. What we should see if covariates are all zeroed.
+Gray histogram: Distribution of deaths when convariates are factored in.
+Red histogram: The Deaths we "observe", restricted to a certain window of ages. Only these go into model as data.
+
+
+
+# Imitate the data frame format that these variables would be in
+nominal covariates should be turned into dummies with reference category dropped
+
+```{r, eval = F}
+# get the covariates only for the observed death ages
+cont_var_vec_trunc <- cont_var_vec[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+nom_var_vec_trunc <- nom_var_vec[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+
+# put them in a matrix
+cov_matrix <- matrix(ncol=2, data=c(cont_var_vec_trunc, nom_var_vec_trunc))
+head(cov_matrix)
+```
+
+
+
+#Initialize and run
+
+```{r, eval = F}
+# list the data
+trunc_mv_stan_data = list(x = death_ages_with_cv_trunc,
+                          c = cov_matrix,
+                          N = length(death_ages_with_cv_trunc),
+                          K = ncol(cov_matrix),
+                          U = highest_age,
+                          L = lowest_age)
+
+# initialize parameters
+init_gomp_trunc_mv <- function () {list(beta=0.06, mode=50, b=c(0,0))} 
+
+trunc_mv_fit =  sampling(object = trunc_mv_gomp_model, 
+                 data = trunc_mv_stan_data, 
+                 init = init_gomp_trunc_mv,
+                 chains = 2,
+                 iter   = 1000, 
+                 warmup = 200)
+```
+
+# Posterior stuff -- how close did I get?
+
+```{r, eval = F}
+traceplot(trunc_mv_fit)
+```
+the chains converged! how close are the parameter estimates?
+
+```{r, eval = F}
+print(trunc_mv_fit, digits=4)
+```
+
+
+```{r, message=F, eval = F}
+h1 <- stan_hist(trunc_mv_fit, pars='mode', fill='coral', color='coral2') +
+  geom_vline(xintercept=mode_actual, linetype='dotdash')
+h2 <- stan_hist(trunc_mv_fit, pars='beta', fill='dodgerblue3', color='dodgerblue4') +
+  geom_vline(xintercept=beta_actual, linetype='dotdash')
+h3 <- stan_hist(trunc_mv_fit, pars='b[1]', fill='maroon3', color='maroon4') +
+  geom_vline(xintercept=b_cont_actual, linetype='dotdash')
+h4 <- stan_hist(trunc_mv_fit, pars='b[2]', fill='maroon3', color='maroon4') +
+  geom_vline(xintercept=b_nom_actual, linetype='dotdash')
+
+grid.arrange(h1, h2, h3, h4, nrow = 2)
+```
+
+not the best prediction for b_2. Wonder if that's a problem with the model or just randomness (either in the MCMC draws or generating the initial distribution of deaths)?
+
+```{r, eval = F}
+set.seed(50)
+n <- 1000
+
+## function to generate data 
+
+generate_truncated_data <- function(n = 1000){
+  # real baseline gompertz parameters
+  beta_actual <-  1/12
+  mode_actual <- 70
+  alpha_actual <- getAlpha(M=mode_actual, beta=beta_actual)
+  
+  # fake covariates
+  cont_var_vec <- rnorm(n=n) #contiunous, random from normal(0,1)
+  b_cont_actual <- 0.5
+  nom_var_vec <- rbinom(n=n, size=1, prob=0.5) #dummy variable, assigned from binomial with p=50% 
+  b_nom_actual <- -0.4
+  
+  # generate death ages
+  death_ages_with_cv <- rgompertz(n=n,
+                                  shape=beta_actual,
+                                  rate=alpha_actual*exp(b_cont_actual*cont_var_vec)*exp(b_nom_actual*nom_var_vec) )
+  
+  # add truncation to get *observed* deaths
+  lowest_age <- 65
+  highest_age <- 95
+  death_ages_with_cv_trunc <- death_ages_with_cv[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+  
+  # get the covariates only for the observed death ages
+  cont_var_vec_trunc <- cont_var_vec[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+  nom_var_vec_trunc <- nom_var_vec[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
+  
+  # put them in a matrix
+  cov_matrix <- matrix(ncol=2, data=c(cont_var_vec_trunc, nom_var_vec_trunc))
+  
+  tuncated_data_and_covariates <- list(death_ages_with_cv_trunc, cov_matrix)
+  
+  return(tuncated_data_and_covariates)
+}
+
+generate_truncated_data(n = 1000)
+```
+
+```{r, eval = F}
+truncated_results <- list()
+
+for (i in 1:300) {
+
+tuncated_data_and_covariates <- generate_truncated_data(n = 1000) 
+
+death_ages_with_cv_trunc <- tuncated_data_and_covariates[[1]]
+cov_matrix <- tuncated_data_and_covariates[[2]]
+
+# list the data
+trunc_mv_stan_data = list(x = death_ages_with_cv_trunc,
+                          c = cov_matrix,
+                          N = length(death_ages_with_cv_trunc),
+                          K = ncol(cov_matrix),
+                          U = highest_age,
+                          L = lowest_age)
+
+# initialize parameters
+init_gomp_trunc_mv <- function () {list(beta = 0.07, mode = 65, b = c(0,0))} 
+
+trunc_mv_fit =  sampling(object = trunc_mv_gomp_model, 
+                 data = trunc_mv_stan_data, 
+                 init = init_gomp_trunc_mv,
+                 chains = 2,
+                 iter   = 1000, 
+                 warmup = 200,
+                 refresh=0)
+
+mode <- mean(rstan::extract(trunc_mv_fit)$mode)
+beta <- mean(rstan::extract(trunc_mv_fit)$beta)
+b_1 <- mean(rstan::extract(trunc_mv_fit)$b[,1])
+b_2 <- mean(rstan::extract(trunc_mv_fit)$b[,2])
+
+cat("iteration = ", i, "\n")
+
+truncated_results[[i]] <- tibble(mode, beta, b_1, b_2)
+}
+
+truncated_results_df <- bind_rows(truncated_results)
+
+truncated_results_df %>% 
+  summarize_all(mean)
+
+truncated_results_df
+
+```
+
+```{r, eval = F}
+results_long <- truncated_results_df %>%
+  mutate(id = row_number()) %>% 
+  pivot_longer(cols = -id) %>% 
+  mutate(true = case_when(
+    name == "mode" ~70,
+    name == "beta" ~ 1/12,
+    name == "b_1" ~ .5,
+    name == "b_2" ~ -.4,
+  )) %>% 
+  group_by(name) %>% 
+  mutate(mean = mean(value)) %>% 
+  ungroup()
+
+
+truncated_covariate_plot <- results_long %>% 
+  ggplot() +
+  geom_histogram(aes(x = value), fill = "grey", color = "black")+ 
+  theme_bw(20) +
+  geom_vline(aes(xintercept = true, colour="True"), size = 1) + 
+  geom_vline(aes(xintercept = mean, color='Estimated'), size = 1) + 
+  labs(title = "Simulation Results",
+       subtitle = "R = 300; N = 1,000",
+       x = "Mode",
+       y = "Count") +
+  scale_color_manual(name = "", values = c("True" = "blue", "Estimated" = "red")) + 
+  theme(legend.position = "bottom") + 
+  facet_wrap(~name, scales = "free", nrow = 2)
+
+ggsave(plot = truncated_covariate_plot, filename = "figures/simulation_truncation_covariates.png", width = 12, height = 6)
+
+```
+
+
