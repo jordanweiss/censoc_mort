@@ -1,0 +1,25 @@
+
+## multicohort gompertz with partial pooling — Integer Death Ages (Rounded, not Floored)
+
+
+> print(re_fit_test2)
+
+Inference for Stan model: multicohort gompertz with partial pooling.
+2 chains, each with iter=1000; warmup=200; thin=1; 
+post-warmup draws per chain=800, total post-warmup draws=1600.
+
+             mean se_mean   sd      2.5%       25%       50%       75%     97.5% n_eff Rhat
+mode[1]     73.75    0.04 0.84     71.91     73.26     73.81     74.33     75.23   508 1.01
+mode[2]     75.66    0.03 0.67     74.23     75.22     75.72     76.15     76.82   572 1.00
+mode[3]     78.55    0.02 0.58     77.39     78.18     78.56     78.92     79.67  1253 1.01
+mode[4]     79.39    0.01 0.57     78.30     79.01     79.37     79.77     80.53  1999 1.00
+mode[5]     81.75    0.03 0.88     80.17     81.11     81.66     82.34     83.62   856 1.00
+beta         0.09    0.00 0.01      0.09      0.09      0.10      0.10      0.10   467 1.01
+mu          77.97    0.08 1.98     74.05     76.72     77.89     79.05     82.45   567 1.00
+sigma        4.01    0.07 1.65      1.87      2.83      3.62      4.77      8.31   506 1.01
+lp__    -21088.86    0.10 2.19 -21094.07 -21090.18 -21088.57 -21087.21 -21085.58   470 1.01
+
+Samples were drawn using NUTS(diag_e) at Wed Mar  3 06:31:23 2021.
+For each parameter, n_eff is a crude measure of effective sample size,
+and Rhat is the potential scale reduction factor on split chains (at 
+convergence, Rhat=1).

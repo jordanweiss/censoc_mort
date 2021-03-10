@@ -330,5 +330,22 @@ ggplot(aes(x = death_ages, fill = window)) +
   labs(x = "Death Age",
        y = "Density") + 
   theme(legend.position="none")
+
+tibble(method = c("mle", "stan"),
+       mode  = c(mode_mle, mode_stan),
+       mle = c(beta_mle, beta_stan)) %>% 
+  knitr::kable()
+```
+
+
+
+```{r}
+test <- numident %>% 
+  # filter(incwage > 0 & incwage < 6000 & sex == "Male") %>% 
+  filter(byear %in% 1915:1920)
+
+model <- lm(death_age ~ as.factor(sex) + as.factor(byear), data = test)
+
+summary(model) 
 ```
 

@@ -1,0 +1,574 @@
+---
+title: "Stan models for multiple cohorts: A comparison of approaches and results"
+output: html_notebook
+---
+
+
+# Set up
+
+Imports
+```{r}
+#setwd("/hdir/0/mariaosborne/censoc")
+library(rstan)
+library(flexsurv)
+library(tidyverse)
+library(bayesplot)
+library(scales)
+library(rstanarm)
+library(data.table)
+source('../gompertz_functions.R')
+```
+
+Toy data generation
+```{r}
+beta_true = 1/10
+## the following variables just have 5 elements
+cohorts = 1815:1819
+number_of_cohorts = length(cohorts)
+first_dyear = 1888
+last_dyear = 1905
+uppers <- last_dyear - cohorts
+lowers <- first_dyear - cohorts
+modes_true <- c(74, 76, 78, 80, 82)
+names(modes_true) <- cohorts
+## these have 5*1000 elements
+N_per_cohort = 3000
+cohort.vec = rep(cohorts, N_per_cohort)
+upper.vec = rep(uppers, N_per_cohort)
+lower.vec = rep(lowers, N_per_cohort)
+mode.vec = modes_true[paste(cohort.vec)]
+
+## build a data.table
+A <- data.table(cohort = cohort.vec, u = upper.vec, l = lower.vec, M = mode.vec)
+
+## simulate ages at death using individual M's and general beta
+set.seed(1)
+A[, y := rgomp_mode(nrow(A), M = M, beta = beta_true)]
+
+## truncate:
+At = A[l < y & y < u]
+At[, y_floor := floor(y)]
+At[, y_round := round(y)]
+```
+
+A quick look at the data structure
+```{r}
+# simple way to assign a grouping index to each cohort
+At[, cohort_index := cohort-1814]
+head(At)
+```
+
+
+# How do these models work?
+
+## Additional inputs needed for all multi-cohort models
+As with single-cohort models, we need the following inputs:
+$$ 
+N \in \mathbb{Z}^+ : \text{An integer, the number of observations} \\
+x[N] : \text{a vector of observed ages at deaths}
+
+$$
+with the following NEW or modified inputs:
+$$
+U[N] : \text{ a vector of upper truncation limits, determined by the individual's birth cohort} \\
+L[N] : \text{ a vector of lower truncation limits, determined by the individual's birth cohort} \\
+num\_cohorts \in \mathbb{Z}^+ : \text{ the number of cohorts in the data set} \\
+cohort\_index[N] \in \{1, .., num\_cohorts\}: \text{ to tell us which group (cohort) the data point comes from}
+$$
+
+model text, compilation & initialization function
+```{r}
+mc_truncation_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound , a vector,  each data pt has U and L determined by birth cohort
+  real U[N];               // upper truncation bound 
+  int  cohort_index[N];    // a way to assign cohorts to certain numbers
+  int num_cohorts;         // number of cohorts included in the data set.
+  real<lower=0> x[N];      // observed ages at death , removed bounding on this because L and U vary
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param (a vector)
+  real<lower=0.001> beta[num_cohorts];   // 'force of mortality' param (a vector)
+}
+
+model {
+  for (i in 1:N) {
+      x[i] ~ gompertz(mode[cohort_index[i]], beta[cohort_index[i]]) T[L[i],U[i]];   // cohort-specifc likelihood 
+  }  
+  mode ~ uniform(60, 90);                     // prior for m (we will have priors be all the same regardless of cohort)
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+}"
+
+multicohort_base_model = stan_model(model_code = mc_truncation_model_text,
+                   model_name='gompertz with multiple cohorts')
+
+init_multicohort_base_model <- function () {list(beta=rep(0.05, number_of_cohorts), mode=rep(75, number_of_cohorts))} 
+```
+
+
+
+
+
+## Model 0 ('base' model, no pooling): The Equivalent of running a single-cohort model multiple times
+Instead of estimating a single real number for each parameter, we have to alter the `parameters` code block to estimate a vector of reals, the same size as the number of groups:
+$$
+mode[num\_cohorts] \\
+\beta [num\_cohorts]
+$$
+And, when estimating the model, we now have that every individual $i$ comes from a cohort $k$:
+
+$$
+x_{i,k} \sim \text{Gompertz}(mode_k, \ \beta_k) \ T[L_k, \ U_k]
+
+$$
+
+How do we implement this? In stan, the loop that estimates likelihoods runs $N$ times -- which is fine since $x$, $L$, and $U$ are already vectors of length $N$. But the mode and beta vectors are only of length num_cohorts. This is why we use the cohort_index vector: it is of length $N$, and allows us to reference which group the data point is coming from. For example, if the dataset consists of people from birth cohorts 1905-1906, then we can assign 
+
+byear=1905 -> cohort_index=1
+byear=1906 -> cohort_index=2
+
+pratically speaking, the order of the indexing doesn't matter. But assigning them chronologically makes sense
+
+In stan code, that means:
+
+$$
+x[i] \sim \text{Gompertz}(\ mode[cohort\_index\ [i]\ ], \ \beta[cohort\_index \ [i] ] \ ) \ \ T[\ L[i], \ U[i]\ ] \\
+  mode \sim \text{uniform}(60, 90)     \\                
+  \beta \sim \text{uniform}(0.001, 0.3)
+$$
+
+note that even though mode and beta are vectors, we can still put priors on them the same as we would with single real numbers. We could also put separate priors on each cohort-specific parameter if desired.
+
+
+## Model 1 (fixed effects(?))
+where we estimate a separate mode for each cohort, but not beta. This is an easy variation on the base model:
+just declare beta as a real number instead of a vector and then run.
+
+$$
+x[i] \sim \text{Gompertz}(\ mode[cohort\_index\ [i]\ ], \beta \ ) \ \ T[\ L[i], \ U[i]\ ] \\
+
+$$
+model text/initialization function
+```{r}
+mc_fe_trunc_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound 
+  real U[N];               // upper truncation bound 
+  int cohort_index[N];    // a way to assign cohorts to certain numbers
+  int num_cohorts;         // number of cohorts included in the data set.
+  real<lower=0> x[N];      // observed ages at death
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param (a vector)
+  real<lower=0.001> beta;   // 'force of mortality' param (a vector)
+}
+
+model {
+  for (i in 1:N) {
+      x[i] ~ gompertz(mode[cohort_index[i]], beta) T[L[i],U[i]];   // cohort-speciifc likelihood 
+  }  
+  mode ~ uniform(60, 90);                     // prior for m (we will have priors be all the same regardless of cohort)
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+}"
+
+
+multicohort_fe_model = stan_model(model_code = mc_fe_trunc_model_text,
+                   model_name='fixed effects gompertz with multiple cohorts, common beta')
+
+init_multicohort_fe_model <- function () {list(beta=0.08, mode=rep(75, number_of_cohorts))} 
+```
+
+
+
+
+
+
+## Model 2 (partial pooling on M, random effects(?))
+This model also estimate a separate mode for each cohort and a common beta.
+Model 3 is different than model 2 because each cohort-specific mode parameter is drawn from the same distribution. This means that we need hyperpriors! In this code, I assume that each cohort-specific mode is drawn from a normal distribution. The hyperpriors specify that normal distribution, but I've not given a lot of thought to what that distribution *should* look like.
+
+So in the `parameters` block I declare:
+$$
+mode[num\_cohorts] \\
+\beta \\
+\mu \\
+\sigma
+$$
+Where $\mu$ and $\sigma$ are my hyperparameters. In the `model` block I have to set priors on these as well as on the mode and beta paramters:
+
+$$
+\mu \sim \text{Uniform} (70, 85) \\
+\sigma \sim \text{Normal} (0,5) \\
+mode \sim \text{Normal} (\mu, \sigma) \\
+\beta \sim \text{Uniform} (0.001, 0.3) \\
+
+$$
+Note how the prior for mode is now determined by the hyperparameters. My choice of distribution on the hyperpriors is fairly arbitrary here.
+
+I can now estimate the model using:
+$$
+x[i] \sim \text{Gompertz}(\ mode[cohort\_index\ [i]],\  \beta \ ) \ \ T[\ L[i], \ U[i]\ ] \\
+
+$$
+
+
+```{r}
+re_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound 
+  real U[N];               // upper truncation bound 
+  int cohort_index[N];     // 
+  int num_cohorts;         // number of cohorts 
+  real<lower=0> x[N];      // observed ages at death 
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // cohort-specific modal age at death param 
+  real<lower=0.001> beta;                // 'force of mortality' param, common to all cohorts
+  real mu;                              // population mode 
+  real<lower=0> sigma;                   // population variance
+}
+
+model {
+  // hyperpriors: 
+  mu ~ uniform(70,85);
+  sigma ~ normal(0,5);
+  
+  // priors
+  beta ~ uniform(0.001,0.3);
+  
+  // cohorts specific mode param: we assume drawn from a common distribution
+  mode ~ normal(mu, sigma);
+  
+  // model
+  for (i in 1:N) {
+      x[i] ~ gompertz(mode[cohort_index[i]], beta) T[L[i],U[i]];   // cohort-specifc likelihood 
+  }  
+}"
+
+multicohort_re_model = stan_model(model_code = re_model_text,
+                   model_name='multicohort gompertz with partial pooling')
+
+
+init_multicohort_re_model <- function () {list(mode=rep(73,number_of_cohorts), beta=0.15, mu=73, sigma=1)} 
+```
+
+
+# Comparing the models on the same (toy) dataset with continuous death ages
+this will take several minutes if run because I have set N fairly large (~7000-ish); comment out unwanted models or reduce the size of At to go faster
+
+```{r}
+# Put the data in a list for Stan input
+multicohort_data <- list(x = At$y,
+            N = nrow(At),
+            num_cohorts = number_of_cohorts,
+            L = At$l,
+            U = At$u,
+            cohort_index = At$cohort_index)
+
+# the base model isn't super interesting -- it works, but it's basically the same as a single-cohort model
+# so I won't be working with it
+# base_fit_test1 = sampling(object = multicohort_base_model, 
+#                  data = multicohort_data, 
+#                  init = init_multicohort_base_model,
+#                  chains = 2,
+#                  iter   = 1000, 
+#                  warmup = 200)
+
+# Fixed effects model
+fe_fit_test1 = sampling(object = multicohort_fe_model, 
+                        data = multicohort_data,
+                        init = init_multicohort_fe_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+
+# Random effects model
+re_fit_test1 = sampling(object = multicohort_re_model, 
+                        data = multicohort_data,
+                        init = init_multicohort_re_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+```
+
+Let's look at the posterior for both of these:
+```{r}
+print(fe_fit_test1)
+print(re_fit_test1)
+```
+
+
+
+# Comparing the models when we have integer death ages; here's where things get weird
+death_age <- floor(death_age)
+
+```{r}
+multicohort_data_floored <- list(x = At$y_round,
+            N = nrow(At),
+            num_cohorts = number_of_cohorts,
+            L = At$l,
+            U = At$u,
+            cohort_index = At$cohort_index)
+
+# fixed effects model
+fe_fit_test2 = sampling(object = multicohort_fe_model, 
+                        data = multicohort_data_floored,
+                        init = init_multicohort_fe_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+
+# Random effects model
+re_fit_test2 = sampling(object = multicohort_re_model, 
+                        data = multicohort_data_floored,
+                        init = init_multicohort_re_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+
+```
+
+and the results
+```{r}
+print(fe_fit_test2)
+
+print(re_fit_test2)
+```
+
+## Comparing Death Ages New Model Specification 
+
+```{r}
+
+```
+
+
+
+
+# Bonus: An example of how to add covariates into the model (this uses the 'base' multicohort model but could probably be adapted for the others as well)
+
+Again, using the proportional hazards:
+$$
+h(x_i|\alpha, \beta, \mathbf{b} )= \alpha \times \exp (\beta x_i) \times \exp (\textbf{C}_{i} \cdot \mathbf{b} )
+$$
+
+so
+$$
+q := \alpha \times \exp (\textbf{C}_{i} \cdot  {\mathbf{b}} ) \\
+h(x_i|q, \beta)= q \times \exp (\beta x_i)
+$$
+
+For a single covariate:
+```{r}
+truncation_bi_model_with_cov_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                          // number of observations
+  real<lower=0> x[N];             // observed ages at death
+  int K;                          // number of predictors
+  vector[N] C;                    // a single covariate -------------
+  real L[N];                         // lower truncation bound (per cohort)
+  real U[N];                          // upper truncation bound (per cohort)
+  int cohort_index[N];             // a way to assign cohorts to certain numbers
+  int num_cohorts;                 // number of cohorts included in the data set.
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param
+  real<lower=0.001> beta[num_cohorts];                // 'force of mortality' param
+  real b;                                // coefficient on this single cov ----------
+}
+
+model {
+  for (i in 1:N) {
+      x[i] ~ gompertz(mode[cohort_index[i]], beta[cohort_index[i]], b, C[i]) T[L[i],U[i]];
+      // likelihood of observing this age at death
+  }  
+  mode ~ uniform(60, 90);                     // prior for m
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+  b ~ normal(0, 2);                           // prior of bvec  
+}
+"
+```
+
+
+For multiple covariates: 
+
+The most convenient way to deal with multiple covariates is to put them all in a matrix, and declare their coefficients as a vector. Otherwise you have to declare all covariates as their own vector and each coefficient as its own variable, and adjust all the arguments to the functions. Especially if you have a lot of covariates, best to have them in matrix form.
+
+*BUT* the inputs to a truncated distribution must be univariate, which means we can't just pass around a matrix or vector of covariates. So we compute $\exp (\textbf{C}_{i} \cdot  {\mathbf{b}} ) $ outside of the loop (I define this quantity as tq)
+
+```{r}
+truncation_bi_model_with_cov_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta, real tq){
+    real alpha = get_alpha(mode, beta) * exp(tq);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta, real tq){
+    real alpha = get_alpha(mode, beta) * exp(tq);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta, real tq){
+    real alpha = get_alpha(mode, beta) * exp(tq);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                          // number of observations
+  real<lower=0> x[N];             // observed ages at death
+  int K;                          // number of predictors
+  matrix[N,K] C;                  // A MATRIX OF COVARIATES
+  real L[N];                      // lower truncation bound (per cohort)
+  real U[N];                      // upper truncation bound (per cohort)
+  int cohort_index[N];            // a way to assign cohorts to certain numbers
+  int num_cohorts;                // number of cohorts included in the data set.
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param
+  real<lower=0.001> beta[num_cohorts];   // 'force of mortality' param
+  vector[K] b;                             // COEFFICIENTS ON THE K COVARIATES
+}
+
+model {
+  for (i in 1:N) {
+      real tq = dot_product(C[i], b);
+      x[i] ~ gompertz(mode[cohort_index[i]], beta[cohort_index[i]], tq) T[L[i],U[i]];
+      // likelihood of observing this age at death
+  }  
+  mode ~ uniform(60, 90);                     // prior for m
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+  b ~ normal(0, 2);                           // prior of bvec - the same for all covariates I guess 
+}
+"
+
+
+# compiling the model takes minute or two
+truncation_bi_cov_model = stan_model(model_code = truncation_bi_model_with_cov_text,
+                   model_name='gompertz multi cohort, truncated, single covariate version 1')
+```
+
+
+
+

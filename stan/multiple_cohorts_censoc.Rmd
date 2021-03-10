@@ -1,0 +1,188 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Summary: Maria's code on CenSoc data
+
+```{r}
+library(data.table)
+```
+
+```{r}
+numident <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
+```
+
+```{r}
+#setwd("/hdir/0/mariaosborne/censoc")
+library(rstan)
+library(flexsurv)
+library(tidyverse)
+library(bayesplot)
+library(scales)
+library(rstanarm)
+library(data.table)
+source('../gompertz_functions.R')
+```
+
+```{r}
+mc_fe_trunc_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound 
+  real U[N];               // upper truncation bound 
+  int cohort_index[N];    // a way to assign cohorts to certain numbers
+  int num_cohorts;         // number of cohorts included in the data set.
+  real<lower=0> x[N];      // observed ages at death
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param (a vector)
+  real<lower=0.001> beta;   // 'force of mortality' param (a vector)
+}
+
+model {
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i]+1|mode[cohort_index[i]], beta),
+                                gompertz_lcdf(x[i]|mode[cohort_index[i]],beta)) -
+                    log_diff_exp(gompertz_lcdf(U[i]| mode[cohort_index[i]], beta),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], beta));
+     }}
+  mode ~ uniform(60, 100);                     // prior for m (we will have priors be all the same regardless of cohort)
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+}"
+
+number_of_cohorts <- 10 
+multicohort_fe_model = stan_model(model_code = mc_fe_trunc_model_text,
+                   model_name='fixed effects gompertz with multiple cohorts, common beta')
+
+init_multicohort_fe_model <- function () {list(beta=0.08, mode=rep(75, number_of_cohorts))} 
+```
+
+
+```{r}
+numident_data <- numident %>% 
+  filter(byear %in% 1910:1919) %>% 
+  select(HISTID, byear, dyear, death_age) %>% 
+  mutate(upper = 2005 - byear + 1,
+         lower = 1988 - byear -1 ,
+         cohort_index = byear - 1909) %>% 
+  sample_n(20000)
+
+# Put the data in a list for Stan input
+censoc_data <- list(x = numident_data$death_age,
+            N = nrow(numident_data),
+            num_cohorts = number_of_cohorts,
+            L = numident_data$lower,
+            U = numident_data$upper,
+            cohort_index = numident_data$cohort_index)
+
+# Fixed effects model
+fe_fit_test1 = sampling(object = multicohort_fe_model, 
+                        data = censoc_data,
+                        init = init_multicohort_fe_model,
+                        chains = 2,
+                         iter = 2000,
+                        warmup = 200)
+
+
+print(fe_fit_test1)
+```s
+
+```{r}
+## drop minimum and maximum death age
+numident_data_adjusted <- numident_data %>% 
+  group_by(byear) %>% 
+  filter(death_age != min(death_age) & death_age != max(death_age)) %>% 
+  ungroup()
+```
+
+```{r}
+# Put the data in a list for Stan input
+censoc_data <- list(x = numident_data_adjusted$death_age,
+            N = nrow(numident_data_adjusted),
+            num_cohorts = number_of_cohorts,
+            L = numident_data_adjusted$lower,
+            U = numident_data_adjusted$upper,
+            cohort_index = numident_data_adjusted$cohort_index)
+
+# Fixed effects model
+
+fe_fit_test2 = sampling(object = multicohort_fe_model, 
+                        data = censoc_data,
+                        init = init_multicohort_fe_model,
+                        chains = 2,
+                         iter = 2000,
+                        warmup = 200)
+
+print(fe_fit_test2)
+```
+
+```{r}
+numident_data %>% 
+  filter(byear == 1911) %>% 
+  count(death_age)
+```
+
+
+
+```{r}
+test <- summary(fe_fit_test1)
+
+df <- test$summary
+
+as.data.frame(test2) %>% 
+   mutate(across(where(is.numeric), round, 3))
+```
+
+```{r}
+x <- 65:100
+n <-  1000
+mode <- 81.814
+beta <- 0.134
+alpha = beta/exp(mode*beta)
+
+
+hist(death_ages_with_cv_trunc, col='red', border='darkgray', breaks=seq(0,110,1))
+curve(n*alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1)), 
+      from=0, to=110, add=TRUE, col = 'darkblue', lty=2, lwd=2)
+```
+
+
+```{r}
+
+```
+
+
+
+

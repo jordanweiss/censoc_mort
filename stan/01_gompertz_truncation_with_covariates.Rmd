@@ -163,11 +163,11 @@ using one nominal and one continuous variable.
 
 ```{r, eval = F}
 set.seed(50)
-n <- 100000
+n <- 1000
 
 # real baseline gompertz parameters
 beta_actual <-  1/12
-mode_actual <- 45
+mode_actual <- 70
 alpha_actual <- getAlpha(M=mode_actual, beta=beta_actual)
 
 # fake covariates
@@ -182,14 +182,14 @@ death_ages_with_cv <- rgompertz(n=n,
                                 rate=alpha_actual*exp(b_cont_actual*cont_var_vec)*exp(b_nom_actual*nom_var_vec) )
 
 # add truncation to get *observed* deaths
-lowest_age <- 35
-highest_age <- 70
+lowest_age <- 65
+highest_age <- 95
 death_ages_with_cv_trunc <- death_ages_with_cv[death_ages_with_cv >= lowest_age & death_ages_with_cv <= highest_age]
 
-hist(death_ages_with_cv, col='gray', border='darkgray', breaks=seq(0,90,1))
-hist(death_ages_with_cv_trunc, col='red', border='darkgray', breaks=seq(0,90,1), add=T)
+hist(death_ages_with_cv, col='gray', border='darkgray', breaks=seq(0,110,1))
+hist(death_ages_with_cv_trunc, col='red', border='darkgray', breaks=seq(0,110,1), add=T)
 curve(n*alpha_actual * exp(beta_actual*x) * exp((-alpha_actual/beta_actual) * (exp(beta_actual*x)-1)), 
-      from=0, to=85, add=TRUE, col = 'darkblue', lty=2, lwd=2)
+      from=0, to=110, add=TRUE, col = 'darkblue', lty=2, lwd=2)
 ```
 Dashed Line: Baseline Gompertz(alpha, beta) distribution. What we should see if covariates are all zeroed.
 Gray histogram: Distribution of deaths when convariates are factored in.
@@ -232,6 +232,7 @@ trunc_mv_fit =  sampling(object = trunc_mv_gomp_model,
                  chains = 2,
                  iter   = 1000, 
                  warmup = 200)
+
 ```
 
 # Posterior stuff -- how close did I get?
@@ -307,7 +308,7 @@ generate_truncated_data(n = 1000)
 ```{r, eval = F}
 truncated_results <- list()
 
-for (i in 1:300) {
+for (i in 1:10) {
 
 tuncated_data_and_covariates <- generate_truncated_data(n = 1000) 
 
@@ -323,7 +324,7 @@ trunc_mv_stan_data = list(x = death_ages_with_cv_trunc,
                           L = lowest_age)
 
 # initialize parameters
-init_gomp_trunc_mv <- function () {list(beta = 0.07, mode = 65, b = c(0,0))} 
+init_gomp_trunc_mv <- function () {list(beta=0.06, mode=65, b=c(0,0))} 
 
 trunc_mv_fit =  sampling(object = trunc_mv_gomp_model, 
                  data = trunc_mv_stan_data, 
@@ -349,7 +350,6 @@ truncated_results_df %>%
   summarize_all(mean)
 
 truncated_results_df
-
 ```
 
 ```{r, eval = F}
@@ -365,7 +365,6 @@ results_long <- truncated_results_df %>%
   group_by(name) %>% 
   mutate(mean = mean(value)) %>% 
   ungroup()
-
 
 truncated_covariate_plot <- results_long %>% 
   ggplot() +

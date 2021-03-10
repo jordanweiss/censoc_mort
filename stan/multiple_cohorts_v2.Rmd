@@ -1,0 +1,266 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+mc_fe_trunc_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound 
+  real U[N];               // upper truncation bound 
+  int cohort_index[N];    // a way to assign cohorts to certain numbers
+  int num_cohorts;         // number of cohorts included in the data set.
+  real<lower=0> x[N];      // observed ages at death
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param (a vector)
+  real<lower=0.001> beta;   // 'force of mortality' param (a vector)
+}
+
+model {
+  // model
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i]+1|mode[cohort_index[i]], beta),
+                                gompertz_lcdf(x[i]|mode[cohort_index[i]],beta)) -
+                    log_diff_exp(gompertz_lcdf(U[i]| mode[cohort_index[i]], beta),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], beta));
+     }} 
+  mode ~ uniform(60, 90);                     // prior for m (we will have priors be all the same regardless of cohort)
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+}"
+
+
+multicohort_fe_model = stan_model(model_code = mc_fe_trunc_model_text,
+                   model_name='fixed effects gompertz with multiple cohorts, common beta')
+
+init_multicohort_fe_model <- function () {list(beta=0.08, mode=rep(75, number_of_cohorts))} 
+```
+
+
+```{r}
+re_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta){
+    real alpha = get_alpha(mode, beta);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                   // number of observations
+  real L[N];               // lower truncation bound 
+  real U[N];               // upper truncation bound 
+  int cohort_index[N];     // 
+  int num_cohorts;         // number of cohorts 
+  real<lower=0> x[N];      // observed ages at death 
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // cohort-specific modal age at death param 
+  real<lower=0.001> beta;                // 'force of mortality' param, common to all cohorts
+  real mu;                              // population mode 
+  real<lower=0> sigma;                   // population variance
+}
+
+model {
+  // hyperpriors: 
+  mu ~ uniform(70,85);
+  sigma ~ normal(0,5);
+  
+  // priors
+  beta ~ uniform(0.001,0.3);
+  
+  // cohorts specific mode param: we assume drawn from a common distribution
+  mode ~ normal(mu, sigma);
+  
+  // model
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i]+1|mode[cohort_index[i]], beta),
+                                gompertz_lcdf(x[i]|mode[cohort_index[i]],beta)) -
+                    log_diff_exp(gompertz_lcdf(U[i]| mode[cohort_index[i]], beta),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], beta));
+     }} 
+}"
+
+multicohort_re_model = stan_model(model_code = re_model_text,
+                   model_name='multicohort gompertz with partial pooling')
+
+
+init_multicohort_re_model <- function () {list(mode=rep(73,number_of_cohorts), beta=0.15, mu=73, sigma=1)} 
+```
+
+
+```{r}
+# Put the data in a list for Stan input
+multicohort_data <- list(x = At$y_floor,
+            N = nrow(At),
+            num_cohorts = number_of_cohorts,
+            L = At$l,
+            U = At$u,
+            cohort_index = At$cohort_index)
+
+# the base model isn't super interesting -- it works, but it's basically the same as a single-cohort model
+# so I won't be working with it
+# base_fit_test1 = sampling(object = multicohort_base_model, 
+#                  data = multicohort_data, 
+#                  init = init_multicohort_base_model,
+#                  chains = 2,
+#                  iter   = 1000, 
+#                  warmup = 200)
+
+# Fixed effects model
+fe_fit_test2_floor = sampling(object = multicohort_fe_model, 
+                        data = multicohort_data,
+                        init = init_multicohort_fe_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+
+# Random effects model
+re_fit_test2_floor = sampling(object = multicohort_re_model, 
+                        data = multicohort_data,
+                        init = init_multicohort_re_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+```
+```{r}
+print(fe_fit_test2_floor)
+print(re_fit_test2_floor)
+```
+
+```{r}
+censoc <- fread("../data/censoc_numident_demo_v1/censoc_numident_demo_v1.csv")
+```
+
+
+For a single covariate:
+```{r}
+truncation_bi_model_with_cov_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+
+  real gompertz_lpdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real prob = alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1));
+    return log(prob);
+  }
+ 
+  real gompertz_lcdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+
+  real gompertz_lccdf(real x, real mode, real beta, real C, real b){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real ccdf = exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(ccdf);
+  }
+ 
+}
+
+data {
+  int N;                          // number of observations
+  real<lower=0> x[N];             // observed ages at death
+  int K;                          // number of predictors
+  vector[N] C;                    // a single covariate -------------
+  real L[N];                         // lower truncation bound (per cohort)
+  real U[N];                          // upper truncation bound (per cohort)
+  int cohort_index[N];             // a way to assign cohorts to certain numbers
+  int num_cohorts;                 // number of cohorts included in the data set.
+}
+
+parameters {
+  real<lower=0> mode[num_cohorts];       // modal age at death param
+  real<lower=0.001> beta[num_cohorts];                // 'force of mortality' param
+  real b;                                // coefficient on this single cov ----------
+}
+
+model {
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i]+1|mode[cohort_index[i]], beta),
+                                gompertz_lcdf(x[i]|mode[cohort_index[i]],beta)) -
+                    log_diff_exp(gompertz_lcdf(U[i]| mode[cohort_index[i]], beta),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], beta));
+     }}
+  mode ~ uniform(60, 90);                     // prior for m
+  beta ~ uniform(0.001, 0.3);                 // prior for beta
+  b ~ normal(0, 2);                           // prior of bvec  
+}
+"
+```
+
+
+```{r}
+# Random effects model
+re_fit_test2 = sampling(object = multicohort_re_model, 
+                        data = multicohort_data_floored,
+                        init = init_multicohort_re_model,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+```
+
