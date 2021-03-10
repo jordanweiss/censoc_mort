@@ -1,17 +1,10 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "CenSoc Multiple Cohorts"
 ---
 
-Summary: Maria's code on CenSoc data
+Summary: Run STAN code on real CenSoc data. 
 
-```{r}
-library(data.table)
-```
-
-```{r}
-numident <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
-```
+We also test whether dropping first and last death age for each cohort affects results. Note these endpoints contain only half true number of deaths due to truncation / lexis triangle subtlety. 
 
 ```{r}
 #setwd("/hdir/0/mariaosborne/censoc")
@@ -22,7 +15,14 @@ library(bayesplot)
 library(scales)
 library(rstanarm)
 library(data.table)
+library(cowplot)
 source('../gompertz_functions.R')
+
+## path on server 
+## numident <- fread("/data/josh/CenSoc/data_release_v2/censoc_numident_v2/censoc_numident_v2.csv")
+
+## Local path 
+numident <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
 ```
 
 ```{r}
@@ -89,7 +89,6 @@ multicohort_fe_model = stan_model(model_code = mc_fe_trunc_model_text,
 init_multicohort_fe_model <- function () {list(beta=0.08, mode=rep(75, number_of_cohorts))} 
 ```
 
-
 ```{r}
 numident_data <- numident %>% 
   filter(byear %in% 1910:1919) %>% 
@@ -120,14 +119,21 @@ print(fe_fit_test1)
 ```
 
 ```{r}
+## explore truncation for two cohorts. Notice death counts drop by 50% for edge points. We need to adjut for this. 
+numident %>% 
+  filter(byear %in% 1915:1916) %>%
+  count(byear, death_age) %>%
+  ggplot(aes(x = death_age, y = n, group = byear)) + geom_point() + geom_line(aes(linetype = as.factor(byear))) + ylim(0, 21000) + theme_cowplot()
+```
+
+```{r}
 ## drop minimum and maximum death age
 numident_data_adjusted <- numident_data %>% 
   group_by(byear) %>% 
   filter(death_age != min(death_age) & death_age != max(death_age)) %>% 
   ungroup()
-```
 
-```{r}
+
 # Put the data in a list for Stan input
 censoc_data <- list(x = numident_data_adjusted$death_age,
             N = nrow(numident_data_adjusted),
@@ -137,7 +143,6 @@ censoc_data <- list(x = numident_data_adjusted$death_age,
             cohort_index = numident_data_adjusted$cohort_index)
 
 # Fixed effects model
-
 fe_fit_test2 = sampling(object = multicohort_fe_model, 
                         data = censoc_data,
                         init = init_multicohort_fe_model,
@@ -148,40 +153,6 @@ fe_fit_test2 = sampling(object = multicohort_fe_model,
 print(fe_fit_test2) 
 ```
 
-```{r}
-numident_data %>% 
-  filter(byear == 1911) %>% 
-  count(death_age)
-```
-
-
-
-```{r}
-test <- summary(fe_fit_test1)
-
-df <- test$summary
-
-as.data.frame(test2) %>% 
-   mutate(across(where(is.numeric), round, 3))
-```
-
-```{r}
-x <- 65:100
-n <-  1000
-mode <- 81.814
-beta <- 0.134
-alpha = beta/exp(mode*beta)
-
-
-hist(death_ages_with_cv_trunc, col='red', border='darkgray', breaks=seq(0,110,1))
-curve(n*alpha * exp(beta*x) * exp((-alpha/beta) * (exp(beta*x)-1)), 
-      from=0, to=110, add=TRUE, col = 'darkblue', lty=2, lwd=2)
-```
-
-
-```{r}
-
-```
 
 
 

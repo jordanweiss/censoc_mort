@@ -1,6 +1,5 @@
 ---
 title: "Stan models for multiple cohorts: A comparison of approaches and results"
-output: html_notebook
 ---
 
 
