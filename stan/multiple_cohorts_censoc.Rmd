@@ -117,7 +117,7 @@ fe_fit_test1 = sampling(object = multicohort_fe_model,
 
 
 print(fe_fit_test1)
-```s
+```
 
 ```{r}
 ## drop minimum and maximum death age
@@ -145,7 +145,7 @@ fe_fit_test2 = sampling(object = multicohort_fe_model,
                          iter = 2000,
                         warmup = 200)
 
-print(fe_fit_test2)
+print(fe_fit_test2) 
 ```
 
 ```{r}
