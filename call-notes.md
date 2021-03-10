@@ -3,9 +3,10 @@ Meeting Notes:
 Call 20210310
 -------------
 
-Take-aways:  
-* For cohorts, drop first and last observed death age (only half true value due to truncation / lexis triangle subtlety)
-* Fitting models on birth cohorts of 1910-1919
+Notes:  
+
+* For cohorts, we need to drop (or account for) first and last observed death age (only half true value due to truncation / lexis triangle subtlety)
+* For real data — we're fitting models with Numident birth cohorts of 1910-1919
 
 Possible Substantive Examples: 
 
