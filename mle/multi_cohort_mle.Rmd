@@ -234,3 +234,21 @@ ggplot(dat, aes(x = age, group = cohort)) +
 
 ```
 
+```
+## Footnote: Two ways to obtain modal values
+
+## option 1
+# Mode <- function(x) {
+#     ux <- unique(x)
+#     ux[which.max(tabulate(match(x, ux)))]
+# }
+
+## option 2
+# Mode <- function(x, na.rm = FALSE) {
+#     if(na.rm){
+#         x = x[!is.na(x)]
+#     }
+#     ux <- unique(x)
+#     return(ux[which.max(tabulate(match(x, ux)))])
+# }
+```
