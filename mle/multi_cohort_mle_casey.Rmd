@@ -1,16 +1,15 @@
 ---
-title: "Multi Cohort MLE with Covariate Notebook"
+title: "R Notebook"
 ---
 
-MLE group cohort model 
+Summary: Casey's adoption of the multi-cohort method. 
 
-## Setup
 
 ```{r}
 library(data.table)
 source("../gompertz_functions.R")
 ## read in data
-dt <- fread("~/Documents/data/censoc_numident_demo_v1/censoc_numident_demo_v1.csv")
+dt <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
 
 ## 1. Write the mll function 
 
@@ -50,6 +49,7 @@ mll.gomp.multicohort.alpha.fe <- function(p,  ## as many alphas as cohorts, and 
 }
 ```
 
+
 ```{r}
 ## 2. Assign values required for mll.gomp.multicohort.alpha.fe function
 
@@ -77,6 +77,9 @@ names(modes_true) <- cohorts
 ## 3. Build data matrix A using CenSoc data
 
 ## prepare incwage covariate
+dt <- fread("~/Documents/data/censoc_numident_demo_v1/censoc_numident_demo_v1.csv")
+
+## prepare incwage covariate
 dt[, inc := incwage]
 dt[incwage == 0, inc := NA]  ## 0 doesn't mean no earnings, it means missing (for various reasons)
 dt[incwage == 999999, inc := NA]  ## 999999 means not eligible for question for various reasons
@@ -87,8 +90,8 @@ x = dt$log_inc  ## covariate is the log of wage income
 getEstimates <- function()
 {    
   cohrt <- dt[byear == 1910]  ## subset a birth cohort
-  cohrt1 <- cohrt[sample(nrow(cohrt), 50), ]  ## randomly choose cases
-  cohrt1 <- cohrt1[, c("byear","death_age","log_inc")]  ## subset all rows for these three columns
+  cohrt1 <- cohrt[sample(nrow(cohrt), 500), ]  ## randomly choose cases
+  cohrt1 <- cohrt1[, c("byear","death_age","sex")]  ## subset all rows for these three columns
   cohrt1$u = 95  ## value obtained from examining age at death distribution for full birth cohort
   cohrt1$l = 77  ## same as line above 
   cohrt1$M = 86  ## value obtained from Mode function (see end of script)
@@ -96,7 +99,7 @@ getEstimates <- function()
   names(cohrt1)[1] = "cohort"
   
   cohrt <- dt[byear == 1911] 
-  cohrt2 <- cohrt[sample(nrow(cohrt), 50), ] 
+  cohrt2 <- cohrt[sample(nrow(cohrt), 500), ] 
   cohrt2 <- cohrt2[, c("byear","death_age","log_inc")]  
   cohrt2$u = 94  
   cohrt2$l = 76 
@@ -105,7 +108,7 @@ getEstimates <- function()
   names(cohrt2)[1] = "cohort"
 
   cohrt <- dt[byear == 1912] 
-  cohrt3 <- cohrt[sample(nrow(cohrt), 50), ] 
+  cohrt3 <- cohrt[sample(nrow(cohrt), 500), ] 
   cohrt3 <- cohrt3[, c("byear","death_age","log_inc")]
   cohrt3$u = 93 
   cohrt3$l = 75 
@@ -114,7 +117,7 @@ getEstimates <- function()
   names(cohrt3)[1] = "cohort"
   
   cohrt <- dt[byear == 1913]
-  cohrt4 <- cohrt[sample(nrow(cohrt), 50), ] 
+  cohrt4 <- cohrt[sample(nrow(cohrt), 500), ] 
   cohrt4 <- cohrt4[, c("byear","death_age","log_inc")] 
   cohrt4$u = 92  
   cohrt4$l = 74 
@@ -123,7 +126,7 @@ getEstimates <- function()
   names(cohrt4)[1] = "cohort"
   
   cohrt <- dt[byear == 1914] 
-  cohrt5 <- cohrt[sample(nrow(cohrt), 50), ] 
+  cohrt5 <- cohrt[sample(nrow(cohrt), 500), ] 
   cohrt5 <- cohrt5[, c("byear","death_age","log_inc")]
   cohrt5$u = 91 
   cohrt5$l = 73
@@ -132,7 +135,7 @@ getEstimates <- function()
   names(cohrt5)[1] = "cohort"
 
   cohrt <- dt[byear == 1915]
-  cohrt6 <- cohrt[sample(nrow(cohrt), 50), ]
+  cohrt6 <- cohrt[sample(nrow(cohrt), 500), ]
   cohrt6 <- cohrt6[, c("byear","death_age","log_inc")]
   cohrt6$u = 90
   cohrt6$l = 72
@@ -141,7 +144,7 @@ getEstimates <- function()
   names(cohrt6)[1] = "cohort"
   
   cohrt <- dt[byear == 1916]
-  cohrt7 <- cohrt[sample(nrow(cohrt), 50), ]
+  cohrt7 <- cohrt[sample(nrow(cohrt), 500), ]
   cohrt7 <- cohrt7[, c("byear","death_age","log_inc")]
   cohrt7$u = 89
   cohrt7$l = 71
@@ -159,7 +162,7 @@ getEstimates <- function()
   names(cohrt8)[1] = "cohort"
   
   cohrt <- dt[byear == 1918]
-  cohrt9 <- cohrt[sample(nrow(cohrt), 50), ]
+  cohrt9 <- cohrt[sample(nrow(cohrt), 500), ]
   cohrt9 <- cohrt9[, c("byear","death_age","log_inc")]
   cohrt9$u = 87
   cohrt9$l = 69
@@ -168,7 +171,7 @@ getEstimates <- function()
   names(cohrt9)[1] = "cohort"
   
   cohrt <- dt[byear == 1919]
-  cohrt10 <- cohrt[sample(nrow(cohrt), 50), ]
+  cohrt10 <- cohrt[sample(nrow(cohrt), 500), ]
   cohrt10 <- cohrt10[, c("byear","death_age","log_inc")]
   cohrt10$u = 86
   cohrt10$l = 68
@@ -192,6 +195,7 @@ getEstimates <- function()
   p.start = log(c(rep(80, length(cohorts)),
                   beta_true * .8),
                   b.guess * .5)
+  
   names(p.start) <- c(paste0("coh", cohorts), "beta")
   
   ## run optimizer
@@ -207,7 +211,6 @@ getEstimates <- function()
   
   write.table(myDF, "myDF_cov.csv", sep = ",", col.names = !file.exists("myDF_cov.csv"), append = T)
 }
-
 
 ## 4. Generate outputs
 
@@ -228,8 +231,6 @@ ggplot(dat, aes(x = age, group = cohort)) +
   scale_x_continuous(limits = c(77, 97)) +
   scale_y_continuous(limits = c(0, .8))
 
-
-
 ## Footnote: Two ways to obtain modal values
 
 ## option 1
@@ -247,4 +248,5 @@ ggplot(dat, aes(x = age, group = cohort)) +
 #     return(ux[which.max(tabulate(match(x, ux)))])
 # }
 ```
+
 

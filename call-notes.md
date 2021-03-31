@@ -1,7 +1,17 @@
 Meeting Notes: 
 
+Call 20210317
+===========================
+ 
+
+TODO
+
+- Compare MLE and STAN estimates (Numident V2, cohorts 1910-1919)
+- Try fitting STAN models with real data + weights 
+- Figure out how would would expect modes to change for cohort over time (HMD data) 
+
 Call 20210310
--------------
+=============
 
 Notes:  
 
@@ -16,10 +26,7 @@ Possible Substantive Examples:
 
 TODO 
 
-* Figure out how would would expect modes to change for cohort over time (HMD data) 
-* Try fitting STAN models with real data + covariates 
-* Try fitting STAN models with real data + weights 
-* Compare MLE and STAN estimates 
+* Try fitting STAN models with real data + covariates  
 
 
 Call 20210303

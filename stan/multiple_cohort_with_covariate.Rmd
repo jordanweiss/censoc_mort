@@ -1,6 +1,5 @@
 ---
 title: "Model test with numident data + one covariate"
-output: html_notebook
 ---
 
 # Imports
@@ -13,8 +12,6 @@ library(bayesplot)
 library(rstanarm)
 library(data.table)
 ```
-
-
 
 #Part 1: the Model
 
@@ -75,9 +72,12 @@ init_multicohort_fe_cov_model <- function () {list(beta=0.08, mode=rep(75, numbe
 
 #Part 2: the Data
 ```{r}
-dt <- fread("/data/josh/CenSoc/censoc_data/censoc_numident_v2/censoc_numident_v2.csv")
+dt <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
 set.seed(1)
-dt <- dt %>% filter(byear %in% 1910:1919) %>% select(c('byear', 'death_age', 'sex')) %>% sample_n(20000)
+dt <- dt %>% 
+  filter(byear %in% 1910:1919) %>%
+  select(c('byear', 'death_age', 'sex')) %>%
+  sample_n(20000)
 
 # one-hot encode the sex variable. Reference category will be males (code male=0, female=1)
 dt <- dt %>% mutate(sex_female = as.integer(sex==2))
@@ -113,6 +113,6 @@ numident_with_covariate_fit <- sampling(object = multicohort_fe_cov_model,
                         warmup = 200)
 
 print(numident_with_covariate_fit)
-#print(numident_with_covariates_fit, pars = c('beta', 'b'))
+# print(numident_with_covariate_fit, pars = c('beta', 'b'))
 ```
 

@@ -234,7 +234,7 @@ ggplot(dat, aes(x = age, group = cohort)) +
 
 ```
 
-```
+```{r}
 ## Footnote: Two ways to obtain modal values
 
 ## option 1
