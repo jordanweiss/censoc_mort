@@ -1,0 +1,252 @@
+---
+title: "R Notebook"
+---
+
+Summary: Casey's adoption of the multi-cohort method. 
+
+
+```{r}
+library(data.table)
+source("../gompertz_functions.R")
+## read in data
+dt <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
+
+## 1. Write the mll function 
+
+mll.gomp.multicohort.alpha.fe <- function(p,  ## as many alphas as cohorts, and 1 beta
+                                          A)  ## data matrix with y, u, l, and covariates, including cohort
+{
+  ## (1) get parameters alpha, beta, and B
+  ## we'll convert later to one element per individual.
+  cohorts = names(table(A$cohort))  ## in data matrix A, each birth year is a name and a cohort
+  k <- length(cohorts)
+  M = exp(p[1:k]); names(M) = cohorts
+  beta = exp(p[k+1])
+  ## convert M to alpha
+  alpha = getAlpha(M, beta); names(alpha) = cohorts
+  
+  if(length(p) > k)  ## if covariates exist
+    B = p[(k+1):length(k)]
+  
+  ## (2) build rate.vec, which has the combined effect of cohort and covariates, 1 element per individual
+  alpha.vec <- alpha[paste(A$cohort)] ## this now has one alpha for each individual
+  covar_effect.vec <- exp(B)
+  rate.vec = alpha.vec * covar_effect.vec
+  y = A$y
+  u.vec = A$u
+  l.vec = A$l
+  
+  ## (3) obtain likelihood
+  ## Numerator has difference in cumulative probabilities, 1 year apart. This works with data that is
+  ## exact to the year of death like we have in CenSoc.
+  num = pgompertz(y + 1, shape = beta, rate = rate.vec)-
+    pgompertz(y, shape = beta, rate = rate.vec)
+  denom = pgompertz(u.vec, shape = beta, rate = rate.vec)-
+    pgompertz(l.vec, shape = beta, rate = rate.vec)
+  R = num/denom
+  minusloglik = -sum(log(R))
+  return(minusloglik)
+}
+```
+
+
+```{r}
+## 2. Assign values required for mll.gomp.multicohort.alpha.fe function
+
+## scalars
+beta_true = 1/10
+b.guess = .6  ## the coefficient (effect) we will try to estimate
+
+## vectors
+cohorts = 1910:1919
+first_dyear = 1988
+last_dyear = 2005
+uppers <- last_dyear - cohorts
+lowers <- first_dyear - cohorts
+
+## identify upper and lower bounds for age at death and modal age at death for each cohort
+# cohrt <- dt[byear == 1911]  ## for each cohort, replace byear and re-run chunk; values go into getEstimates function
+# max(cohrt$death_age)
+# min(cohrt$death_age)
+# Mode(cohrt$death_age)
+
+modes_true <- c(86, 83, 89, 85, 85, 88, 83, 84, 83, 82)  ## found using Mode function (see bottom of script) on each cohort
+names(modes_true) <- cohorts
+
+
+## 3. Build data matrix A using CenSoc data
+
+## prepare incwage covariate
+dt <- fread("~/Documents/data/censoc_numident_demo_v1/censoc_numident_demo_v1.csv")
+
+## prepare incwage covariate
+dt[, inc := incwage]
+dt[incwage == 0, inc := NA]  ## 0 doesn't mean no earnings, it means missing (for various reasons)
+dt[incwage == 999999, inc := NA]  ## 999999 means not eligible for question for various reasons
+dt$log_inc <- log(dt$inc)  ## take the log of the cleaned incwage vector
+dt <- dt[sex == "Male" & dyear %in% 1988:2005 & !is.na(log_inc)]  ## create sample
+x = dt$log_inc  ## covariate is the log of wage income
+
+getEstimates <- function()
+{    
+  cohrt <- dt[byear == 1910]  ## subset a birth cohort
+  cohrt1 <- cohrt[sample(nrow(cohrt), 500), ]  ## randomly choose cases
+  cohrt1 <- cohrt1[, c("byear","death_age","sex")]  ## subset all rows for these three columns
+  cohrt1$u = 95  ## value obtained from examining age at death distribution for full birth cohort
+  cohrt1$l = 77  ## same as line above 
+  cohrt1$M = 86  ## value obtained from Mode function (see end of script)
+  names(cohrt1)[2] = "y"
+  names(cohrt1)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1911] 
+  cohrt2 <- cohrt[sample(nrow(cohrt), 500), ] 
+  cohrt2 <- cohrt2[, c("byear","death_age","log_inc")]  
+  cohrt2$u = 94  
+  cohrt2$l = 76 
+  cohrt2$M = 83
+  names(cohrt2)[2] = "y"
+  names(cohrt2)[1] = "cohort"
+
+  cohrt <- dt[byear == 1912] 
+  cohrt3 <- cohrt[sample(nrow(cohrt), 500), ] 
+  cohrt3 <- cohrt3[, c("byear","death_age","log_inc")]
+  cohrt3$u = 93 
+  cohrt3$l = 75 
+  cohrt3$M = 89 
+  names(cohrt3)[2] = "y"
+  names(cohrt3)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1913]
+  cohrt4 <- cohrt[sample(nrow(cohrt), 500), ] 
+  cohrt4 <- cohrt4[, c("byear","death_age","log_inc")] 
+  cohrt4$u = 92  
+  cohrt4$l = 74 
+  cohrt4$M = 85  
+  names(cohrt4)[2] = "y"
+  names(cohrt4)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1914] 
+  cohrt5 <- cohrt[sample(nrow(cohrt), 500), ] 
+  cohrt5 <- cohrt5[, c("byear","death_age","log_inc")]
+  cohrt5$u = 91 
+  cohrt5$l = 73
+  cohrt5$M = 85
+  names(cohrt5)[2] = "y"
+  names(cohrt5)[1] = "cohort"
+
+  cohrt <- dt[byear == 1915]
+  cohrt6 <- cohrt[sample(nrow(cohrt), 500), ]
+  cohrt6 <- cohrt6[, c("byear","death_age","log_inc")]
+  cohrt6$u = 90
+  cohrt6$l = 72
+  cohrt6$M = 88
+  names(cohrt6)[2] = "y"
+  names(cohrt6)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1916]
+  cohrt7 <- cohrt[sample(nrow(cohrt), 500), ]
+  cohrt7 <- cohrt7[, c("byear","death_age","log_inc")]
+  cohrt7$u = 89
+  cohrt7$l = 71
+  cohrt7$M = 83
+  names(cohrt7)[2] = "y"
+  names(cohrt7)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1917]
+  cohrt8 <- cohrt[sample(nrow(cohrt), 50), ]
+  cohrt8 <- cohrt8[, c("byear","death_age","log_inc")]
+  cohrt8$u = 88
+  cohrt8$l = 70
+  cohrt8$M = 84
+  names(cohrt8)[2] = "y"
+  names(cohrt8)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1918]
+  cohrt9 <- cohrt[sample(nrow(cohrt), 500), ]
+  cohrt9 <- cohrt9[, c("byear","death_age","log_inc")]
+  cohrt9$u = 87
+  cohrt9$l = 69
+  cohrt9$M = 83
+  names(cohrt9)[2] = "y"
+  names(cohrt9)[1] = "cohort"
+  
+  cohrt <- dt[byear == 1919]
+  cohrt10 <- cohrt[sample(nrow(cohrt), 500), ]
+  cohrt10 <- cohrt10[, c("byear","death_age","log_inc")]
+  cohrt10$u = 86
+  cohrt10$l = 68
+  cohrt10$M = 82
+  names(cohrt10)[2] = "y"
+  names(cohrt10)[1] = "cohort"
+
+  ## combine cohorts into a single data matrix A
+  A <- rbind(cohrt1, cohrt2, cohrt3, cohrt4, cohrt5, cohrt6, cohrt7, cohrt8, cohrt9, cohrt10)
+  
+  ## check to see that mean age at death decreases as birth cohort gets more recent
+  A[, mean(y), by = cohort]
+  
+  ## truncate the cohort to upper and lower truncation points
+  At = A[l < y & y < u]
+  
+  ## floor so it is like "death_age", so 76.89 becomes 76
+  At[, y := floor(y)]
+  
+  ## starting values
+  p.start = log(c(rep(80, length(cohorts)),
+                  beta_true * .8),
+                  b.guess * .5)
+  
+  names(p.start) <- c(paste0("coh", cohorts), "beta")
+  
+  ## run optimizer
+  fit = optim(par = p.start, fn = mll.gomp.multicohort.alpha.fe,
+              A = At,
+              control = list(maxit = 50))
+  
+  hat <- round(exp(fit$par), digits = 3)
+  true <- c(modes_true, beta_true)
+  
+  print(cbind(hat, true))
+  myDF <- cbind(hat, true)
+  
+  write.table(myDF, "myDF_cov.csv", sep = ",", col.names = !file.exists("myDF_cov.csv"), append = T)
+}
+
+## 4. Generate outputs
+
+# obtain estimates
+replicate(5, getEstimates())  ## indicate how many times getEstimates function will loop
+
+## plot the results
+path_to_data <- "~/GDrive/demographer/github/censoc_mort/"
+
+dat <- read.csv(paste0(path_to_data, "myDF_cov.csv"), skip = 1, header = F)
+setDT(dat)
+setnames(dat, old = c('V1','V2','V3'), 
+         new = c('cohort','age','coef'))
+dat <- dat[cohort != "beta"]
+
+ggplot(dat, aes(x = age, group = cohort)) +
+  geom_density(aes(fill = cohort), alpha = 0.4) +
+  scale_x_continuous(limits = c(77, 97)) +
+  scale_y_continuous(limits = c(0, .8))
+
+## Footnote: Two ways to obtain modal values
+
+## option 1
+# Mode <- function(x) {
+#     ux <- unique(x)
+#     ux[which.max(tabulate(match(x, ux)))]
+# }
+
+## option 2
+# Mode <- function(x, na.rm = FALSE) {
+#     if(na.rm){
+#         x = x[!is.na(x)]
+#     }
+#     ux <- unique(x)
+#     return(ux[which.max(tabulate(match(x, ux)))])
+# }
+```
+
+

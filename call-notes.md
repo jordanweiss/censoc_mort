@@ -37,9 +37,3 @@ TODO
 * Retry with different cohorts (10x)
 * Random walk with drift 
 * Compare with estimates from last group  
-
-
-
-
-
-

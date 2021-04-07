@@ -96,7 +96,7 @@ numident_data <- numident %>%
   mutate(upper = 2005 - byear + 1,
          lower = 1988 - byear,
          cohort_index = byear - 1909) %>% 
-  sample_n(5000)
+  sample_n(10000)
 
 # Put the data in a list for Stan input
 censoc_data <- list(x = numident_data$death_age,
@@ -128,7 +128,7 @@ numident %>%
 
 ```{r}
 ## drop minimum and maximum death age
-numident_data <- numident %>% 
+numident_data_adjusted <- numident %>% 
   filter(byear %in% 1910:1919) %>% 
   select(HISTID, byear, dyear, death_age) %>% 
   group_by(byear) %>% 
@@ -137,7 +137,7 @@ numident_data <- numident %>%
   mutate(upper = 2005 - byear + 1,
          lower = 1988 - byear,
          cohort_index = byear - 1909) %>% 
-  sample_n(1000)
+  sample_n(10000)
 
  
 # Put the data in a list for Stan input

@@ -1,0 +1,166 @@
+---
+title: "Model test with numident data + one covariate"
+---
+
+# Imports
+
+```{r}
+#setwd("/hdir/0/mariaosborne/censoc")
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(rstanarm)
+library(data.table)
+```
+
+#Part 1: the Model
+
+This model combines most of what we've built: ability to handle multiple cohorts, cohort fixed effect for M,
+ability to input discrete data points, estimation of covariate effects via proportional hazards model
+(this model cannot handle multiple covariates, but that is a straightforward extension.)
+```{r}
+multicohort_truncated_fe_cov_model_text = "
+functions {
+  real get_alpha(real mode, real beta) {
+    real alpha = beta/exp(mode*beta);
+    return(alpha);
+  }
+  real gompertz_lcdf(real x, real mode, real beta, real b, real C){
+    real alpha = get_alpha(mode, beta) * exp(C*b);
+    real cdf = 1 - exp((-alpha/beta)*(exp(beta*x)-1));
+    return log(cdf);
+  }
+}
+data {
+  int N;                   // number of observations
+  real L[N];               // lower bound = lowest observed age
+  real U[N];               // upper bound = highest observed age + 1
+  int cohort_index[N];     // assigns cohorts to ordinal numbers 1,2,..,num_cohorts
+  int num_cohorts;         // number of cohorts included in the data set
+  real C[N];               // a single covariate vector
+  real<lower=0> x[N];      // observed ages at death
+}
+parameters {
+  real<lower=0> mode[num_cohorts];    // modal age at death param (a vector)
+  real<lower=0.001> beta;             // 'force of mortality' param 
+  real b;                             // effect of the single covariate
+}
+model {
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i] + 1|mode[cohort_index[i]], beta, b, C[i]),
+                                gompertz_lcdf(x[i] | mode[cohort_index[i]],beta, b, C[i])) -
+                    log_diff_exp(gompertz_lcdf(U[i] | mode[cohort_index[i]], beta, b, C[i]),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], beta, b, C[i]));
+     }
+  }
+  mode ~ uniform(70, 90);             // prior for m (we will have priors be all the same regardless of cohort)
+  beta ~ uniform(0.001, 0.3);         // prior for beta
+  b ~ normal(0,2);                    // prior for b
+}"
+
+
+number_of_cohorts <- 5 
+multicohort_fe_cov_model = stan_model(model_code = multicohort_truncated_fe_cov_model_text,
+                   model_name='fixed effects gompertz with multiple cohorts, common beta, single covariate')
+init_multicohort_fe_cov_model <- function () {list(beta=0.08, mode=rep(75, number_of_cohorts), b=0)} 
+```
+
+
+#Part 2: the Data
+```{r}
+## dt <- fread("~/Documents/data/censoc_numident_v2/censoc_numident_v2.csv")
+dt <- fread("../data/censoc_numident_demo_v1.csv")
+
+set.seed(1)
+dt <- dt %>% 
+  filter(byear %in% 1910:1919) %>%
+  select(c('byear', 'death_age', 'sex')) %>%
+  sample_n(20000)
+
+cohorts = 1915:1919
+
+A = my.dt[, .(y = death_age,
+              u = 2005 - byear,
+              l = 1988 - byear,
+              cohort = byear,
+              covar = edu)]
+
+At = A[l < y & y < u]
+
+# one-hot encode the sex variable. Reference category will be males (code male=0, female=1)
+dt <- dt %>% mutate(sex_female = as.integer(sex==2))
+
+# drop the endpoints
+dt <- dt %>% group_by(byear) %>%
+  mutate(lb = min(death_age), ub = max(death_age)) %>% 
+  ungroup() %>% 
+  filter(death_age > lb & death_age < ub) 
+
+# put this in a list for stan. Notice the lower bound adjustment; this ensures we are not including an
+# 'empty' age in the distribution after dropping data at the lower endpoint. The upper bound is fine as 
+# it because we actually want that to be one higher than the highest observed age after dropping endpoints.
+numident_data_with_covariate <- list(
+  N = nrow(At),
+  L = At$l ,
+  U = At$u,
+  cohort_index = At$cohort - 1915 + 1,
+  num_cohorts = number_of_cohorts,
+  C = At$covar,
+  x = At$y)
+
+```
+
+
+# part 3: running the model
+```{r}
+numident_with_covariate_fit <- sampling(object = multicohort_fe_cov_model, 
+                        data = numident_data_with_covariate,
+                        init = init_multicohort_fe_cov_model,
+                        chains = 2,
+                        iter   = 3000,
+                        warmup = 200,
+                        cores = 2)
+
+print(numident_with_covariate_fit)
+# print(numident_with_covariate_fit, pars = c('beta', 'b'))
+```
+
+Clean up estimates 
+```{r}
+test <- summary(numident_with_covariate_fit)
+
+stan_educ_estimates <- test$summary %>% 
+  as.data.frame() %>% 
+  mutate(across(where(is.double), ~round(x = .x, digits = 3))) %>% 
+  select(estimate = mean, lower = "2.5%", upper = "97.5%") %>% 
+  rownames_to_column("parameter") %>% 
+  rename_at(vars(-parameter),function(x) paste0(x,"_stan")) %>% 
+  filter(parameter != "lp__") %>% 
+  mutate(parameter = case_when(
+    parameter == "mode[1]" ~ "coh1915",
+    parameter == "mode[2]" ~ "coh1916",
+    parameter == "mode[3]" ~ "coh1917",
+    parameter == "mode[4]" ~ "coh1918",
+    parameter == "mode[5]" ~ "coh1919",
+    TRUE ~ parameter
+  ))
+```
+
+
+Compare with education parameter estimates from MLE. This requires running a separate script! 
+
+```{r}
+mle_educ_estimates <- mle %>% 
+  select(estimate = hat, lower = "hat.lower", upper = "hat.upper") %>% 
+  rownames_to_column("parameter") %>% 
+  rename_at(vars(-parameter),function(x) paste0(x,"_mle"))
+
+education_comparison <- stan_educ_estimates %>% 
+  inner_join(mle_educ_estimates)
+
+```
+
