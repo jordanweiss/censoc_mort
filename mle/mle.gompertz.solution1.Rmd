@@ -1,0 +1,186 @@
+---
+title: "MLE solution for a single birth cohort with covariate"
+subtitle: '[Insert title of CenSoc MLE working paper here]'
+date: "June 2021"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+&nbsp;
+
+The purpose of this Notebook is to demonstrate the maximum likelihood estimation (MLE) approach to estimating mortality from CenSoc data for a single birth cohort and a single covariate, as discussed in Section 3 of the CenSoc Working Paper Series monograph linked [here](https://).
+
+To run this code, you will need the CenSoc-Numident dataset, a data extract from the IPUMS USA 100% sample for 1940 and its DDI codebook file, and a small R script called *gompertz_functions* that R will read as a source file. All four files should be kept in the same folder. As two of these files are very large, you are advised to download everything to a computer or server with as much random-access memory as possible. (CenSoc-Numident version 2.0 is 432MB and IPUMS USA 100% samples for 1940 can quickly grow to 5GB or more depending on number of variables, even after compression.)
+
+* To obtain CenSoc-Numident, click this [link](https://censoc-download.demog.berkeley.edu). Either version will work, but the example discussed in the [monograph](https://) uses version 2.0. Click [here](https://censoc.berkeley.edu) to learn more about CenSoc data products and the differences between versions.
+
+* To create an IPUMS USA data extract, click this [link](https://usa.ipums.org/usa/). Please ensure your data extract is from the 100% (full-count) sample for 1940 and the following variables are included: SEX, AGE, GQ, BPL, EDUC, EDUCD. (EDUCD is automatically included when you select EDUC.) To reduce file size, you may use the "select cases" feature to restrict your sample to persons aged 0 to 41 years, which will capture everyone captured in the 1940 Census born between 1900 and 1940. **Please note:** the DDI codebook file will be available immediately for download upon submitting a data extract request. From the IPUMS download page, Windows users can simply click the DDI link under the Codebook column, while Mac users should right-click the link, select "Download linked file as...", and ensure the filetype is XML.
+
+- For the gompertz_functions.R source file, the code is available from GitHub [here](https://). You may copy-paste the lines of code into a new R script and save it locally.
+
+&nbsp;
+
+#### Preliminaries
+```{r preliminaries, echo=FALSE}
+# Set the working directory
+  setwd("~/Documents/MLE")  ## change filepath as necessary
+
+# Load libraries and source file
+  library(data.table)
+  library(ipumsr)
+  library(tidyverse)
+  source("gompertz_functions.R")
+```
+
+#### Assemble data files
+```{r assemble data files, eval=FALSE}
+# Read in CenSoc-Numident dataset
+  #dt = fread("/data/censoc_numident_v2.csv")  ## change filepath as necessary
+# Read in IPUMS 1940 full count data
+  ipums <- read_ipums_micro(data_file = './usa_00019.dat.gz',
+                                  ddi = './usa_00019.xml')
+
+# Apply filters
+  ipums <- ipums %>%
+                 filter(BPL %in% 1:56,  # Restrict to persons born in the US
+                 AGE %in% c(0:41),  # Restrict to persons born 1900 to 1940
+                 GQ %in% c(1:2),  # Restrict to persons living in households
+                 )
+  
+# Merge the two datasets on the HISTID unique case identifier
+  dta <- inner_join(dt, ipums, by = "HISTID")
+  
+# Save the result as an R object. We suggest doing this to spare the effort of rebuilding this merged dataset from scratch each time you open this script
+  saveRDS(object = dta, file = "./dta_numident")
+```
+
+#### Create analytic sample
+```{r create analytic sample}
+# Load the merged R object and change the letter case of variable headers
+  dta <- readRDS("./dta_numident")
+  names(dta) <- tolower(names(dta))
+
+# Recode years of education completed as a continuous variable
+  dta[educd == 999, edu := NA]
+  dta[educd %in% 2:12, edu := 0]
+  dta[educd == 14, edu := 1]
+  dta[educd == 15, edu := 2]
+  dta[educd == 16, edu := 3]
+  dta[educd == 17, edu := 4]
+  dta[educd == 22, edu := 5]
+  dta[educd == 23, edu := 6]
+  dta[educd == 25, edu := 7]
+  dta[educd == 26, edu := 8]
+  dta[educd == 30, edu := 9]
+  dta[educd == 40, edu := 10]
+  dta[educd == 50, edu := 11]
+  dta[educd == 60, edu := 12]
+  dta[educd == 70, edu := 13]
+  dta[educd == 80, edu := 14]
+  dta[educd == 90, edu := 15]
+  dta[educd == 100, edu := 16]
+  dta[educd %in% 110:113, edu := 17]
+  dta[grepl("Grade ", educd), edu := gsub("Grade ", "", educd)]
+
+# Check that everything looks ok
+  dta[, table(educd, edu)]
+  
+# Create an analytic sample of males born 1918; note that year of death is restricted to the Numident window of observed deaths
+  my.dt <- dta[sex == 1 & dyear %in% 1988:2005 & byear == 1918 & !is.na(edu)]
+
+# Run a frequency table and/or histogram to identify a candidate modal age at death
+  table(my.dt$death_age, exclude = FALSE)
+  hist(my.dt$death_age)  ## note that death_age values are floored integers
+```
+
+#### Set MLE parameters
+```{r set MLE parameters}
+# Assign parameter values to pass to the MLE function. These values are our best guesses for describing a Gompertz distribution that best fits our CenSoc-Numident observations
+  M.guess = 80  ## modal age at death is the location parameter
+  beta.guess = 1/10  ## mortality hazard rate is the rate parameter
+  b.guess = .6  ## coefficient of the education covariate. Note that this is NOT a parameter for the Gompertz distribution, but rather a proportional hazard that changes the risk of mortality at the same rate at all ages
+
+# Assign other inputs required by the MLE function
+  n = 193478  ## post-filter count of cases
+  u = 88  ## upper bound of age at death given the sample n; needs to be 1 year higher than the oldest observed age at death
+  l = 69  ## lower bound given the sample n
+  alpha = 10^-4.5  ## alpha tends to be between 10^-6 and 10^-3
+  
+# We use actual ages at death instead of simulated ages
+  x <- my.dt$edu  ## vector of number of years of school completed
+  y <- my.dt[, death_age]  ## vector of ages at death
+  rate.vec = alpha * exp(x * b.guess)  ## vector of proportional hazards
+  M.vec <- getMode(alpha = rate.vec, beta = beta.guess)  ## 
+  xt = x  ## truncated number of years of school completed
+  yt = y  ## truncated ages at death are 
+```
+
+#### Define MLE function
+```{r define MLE function}
+minusLogLik_2 =  function(yt, xt, p, u, l) ## p is a vector of M and log(beta)
+{
+    M = exp(p[1])
+    beta = exp(p[2])
+    b = p[3] ## no exp()
+    alpha = getAlpha(M = M, beta = beta) ## may be thought of as alpha.hat and beta.hat
+    rate.vec = alpha * exp(xt * b)  ## may be thought of as rate.vec.hat
+    M.vec <- getMode(alpha = rate.vec, beta = beta) 
+    ## denom : F(u) - F(l)
+    denom = pgomp_mode(u, M = M.vec, beta = beta) - pgomp_mode(l, M = M.vec, beta = beta)
+    ## replace 0s with a very small number for numerical stability before taking logs
+    eps = 10^-6
+    denom[denom == 0] <- eps
+    ## L = f1/denom * f2/denom ... = f1*f2*f3 / denom^n
+    ## LL = sum(log(fi)) - sum( log(denom))
+    LL = sum(dgomp_mode(yt, M = M.vec, beta = beta, log = TRUE)) - sum(log(denom))
+    mLL = -LL
+    return(mLL)
+}
+```
+
+#### Maximize the likelihood
+```{r maximize likelihood}
+# Give starting values for the optimizer from which to start its search. These values can be just a little off from the parameters given earlier
+  p.start = c(log.M = log(M.guess * .79),
+            log.beta = log(beta.guess * 1.2),
+            b = b.guess * .1)
+
+# Run the optimizer
+  fit = optim(par = p.start, fn = minusLogLik_2, yt = yt, xt = xt, u = u, l = l)
+
+# Extract estimates
+  log.est = fit$par
+  est = round(c(exp(log.est[1:2]), log.est[3]),3)
+  names(est) = c("M.hat", "beta.hat", "b.hat")
+  guess <- c("M.guess" = M.guess, "beta.guess" = beta.guess, b.guess = b.guess)
+  print(cbind(est, guess))
+
+# Find Hessian estimated standard errors
+  set.seed(123)
+  fit.hess = optim(par = p.start, fn = minusLogLik_2, yt = yt, xt = xt, u = u, l = l,
+                    hessian = TRUE)
+  fit2 <- fit.hess
+
+  H = fit2$hessian
+  fisher_info = solve(H)
+  sigma.hat <- sqrt(diag(fisher_info))
+  upper <- fit2$par + 1.96 * sigma.hat
+  lower <- fit2$par - 1.96 * sigma.hat
+  interval <- data.frame(value = fit2$par, upper = upper, lower = lower)
+  round(interval, digits = 3)
+  round(exp(interval[1:2,]), digits = 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
