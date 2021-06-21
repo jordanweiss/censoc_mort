@@ -1,0 +1,180 @@
+---
+title: "Education models for paper"
+output: html_notebook
+---
+
+# imports
+```{r}
+setwd("/hdir/0/mariaosborne/censoc")
+#library(rstan, lib = )
+library(rstantools, lib.loc = "/hdir/0/mariaosborne/R/x86_64-pc-linux-gnu-library/3.6")
+library(rstan, lib.loc = "/hdir/0/mariaosborne/R/x86_64-pc-linux-gnu-library/3.6")
+library(flexsurv)
+library(tidyverse)
+library(bayesplot)
+library(scales)
+library(rstanarm)
+library(data.table)
+library(StanHeaders)
+library(BayesPostEst)
+source('/hdir/0/mariaosborne/censoc/technical paper stuff/gompertz_functions.R')
+```
+
+
+# data
+```{r}
+# read censoc
+censoc <- fread("/data/josh/CenSoc/censoc_data/censoc_dmf_v2/censoc_dmf_v2.csv")
+# limit to conservative links only
+censoc_cons <- censoc %>% filter(link_abe_exact_conservative==1)
+
+# read census
+census <- fread("/hdir/0/mariaosborne/Downloads/usa_00026.csv.gz")
+  
+# join
+dmf_census_joined <- inner_join(censoc_cons,
+                                census %>% select(HISTID, EDUC, EDUCD),
+                                by='HISTID')
+
+# Recode education levels
+dmf_census_joined <- dmf_census_joined %>% filter(!(EDUCD %in% c(0,999))) %>% 
+  mutate(educ_recode = case_when(EDUCD %in% 14:17 ~ EDUCD - 13,
+          EDUCD %in% 22:23 ~ EDUCD - 17,
+          EDUCD %in% 25:26 ~ EDUCD - 18,
+          EDUCD == 30 ~ 9,
+          EDUCD == 40 ~ 10,
+          EDUCD == 50 ~ 11,
+          EDUCD == 60 ~ 12,
+          EDUCD == 70 ~ 13,
+          EDUCD == 80 ~ 14,
+          EDUCD == 90 ~ 15,
+          EDUCD == 100 ~ 16,
+          EDUCD < 14 ~ 0,
+          TRUE ~ 17))
+
+dmf_census_joined_limited <- dmf_census_joined %>% filter(byear %in% 1905:1914) %>% 
+  group_by(byear) %>% 
+  mutate(max_obs = max(death_age), min_obs = min(death_age)) %>% 
+  ungroup() %>% 
+  filter(death_age != max_obs & death_age != min_obs)
+```
+
+
+
+# Model Text
+```{r}
+multicohort_truncated_fe_model_text = "
+functions {
+  real cohort_effect(real mode, real b) {
+    real a = b/exp(mode*b);
+    return(a);
+  }
+  real gompertz_lcdf(real x, real mode, real b, real beta, real C){
+    real alpha = cohort_effect(mode, b) * exp(beta*C);
+    real cdf = 1 - exp((-alpha/b)*(exp(b*x)-1));
+    return log(cdf);
+  }
+}
+data {
+  int N;                   // number of observations
+  real L[N];               // lower bound = lowest observed age
+  real U[N];               // upper bound = highest observed age + 1
+  int cohort_index[N];     // assigns cohorts to ordinal numbers starting at 1
+  int num_cohorts;         // number of cohorts included in the data set
+  real<lower=0> x[N];      // observed ages at death
+  real C[N];               // A single covariate
+  int K;                   // number of covariates
+}
+parameters {
+  real<lower=0> mode[num_cohorts];    // modal age at death param (a vector)
+  real<lower=0.001> b;             // 'force of mortality' param 
+  real beta;
+}
+model {
+  for (i in 1:N) {
+     if (x[i] < L[i] || x[i] > U[i]) {
+          target += negative_infinity();
+     }
+     else {
+          target += log_diff_exp(gompertz_lcdf(x[i]+1|mode[cohort_index[i]], b, beta, C[i]),
+                                gompertz_lcdf(x[i]|mode[cohort_index[i]],b, beta, C[i])) -
+                    log_diff_exp(gompertz_lcdf(U[i]| mode[cohort_index[i]], b, beta, C[i]),
+                                gompertz_lcdf(L[i] | mode[cohort_index[i]], b, beta, C[i]));
+     }}
+  mode ~ uniform(70, 85);             // prior for m (we will have priors be all the same regardless of cohort)
+  b ~ uniform(0.05, 0.15);            // prior for b
+  beta ~ normal(0,1);                 // prior for beta
+}"
+
+
+multicohort_with_fixed_effects_model = stan_model(model_code = multicohort_truncated_fe_model_text,
+                   model_name='fixed effects gompertz with multiple cohorts, common b')
+```
+
+
+
+
+# Multi-cohort model
+```{r}
+dmf_sample <- sample_n(dmf_census_joined_limited, 20000)
+  
+data_dmf <- list(
+  N = nrow(dmf_sample),
+  L = dmf_sample$min_obs+1,
+  U = dmf_sample$max_obs,
+  cohort_index = dmf_sample$byear-1904,
+  num_cohorts = 10,
+  x = dmf_sample$death_age,
+  C = dmf_sample$educ_recode,
+  K = 1
+)
+
+init_mc <- function () {list(b=0.08, mode=rep(79,10), beta=0)} 
+
+educ_fit = sampling(object = multicohort_with_fixed_effects_model, 
+                        data = data_dmf,
+                        init = init_mc,
+                        chains = 2,
+                         iter   = 1000,
+                        warmup = 200)
+
+print(educ_fit, digits=3)
+
+```
+
+
+
+# Single cohort: 1910
+```{r}
+# this uses the same model as previous, but num_cohorts is set to 1
+dmf_1910_sample <- dmf_census_joined_limited %>% filter(byear==1910) %>% sample_n(20000)
+data_dmf_1910 <- list(
+  N = nrow(dmf_1910_sample),
+  L = dmf_1910_sample$min_obs+1,
+  U = dmf_1910_sample$max_obs,
+  cohort_index = dmf_1910_sample$byear-1909,
+  num_cohorts = 1,
+  x = dmf_1910_sample$death_age,
+  C = dmf_1910_sample$educ_recode,
+  K = 1
+)
+
+init_oc <- function () {list(b=0.08, mode=as.array(79), beta=0)} 
+
+educ_fit_1910 = sampling(object = multicohort_with_fixed_effects_model, 
+                        data = data_dmf_1910,
+                        init = init_oc,
+                        chains = 2,
+                        iter   = 1000,
+                        warmup = 200)
+
+print(educ_fit_1910)
+
+mcmc_dens(educ_fit_1910, point_est='mean', ci_level=0.95)
+mcmcReg(educ_fit_1910, coefs=c('M', 'b', 'beta', 'lp'), digits=3)
+
+color_scheme_set("red")
+stan_hist(educ_fit_1910)
+
+```
+
