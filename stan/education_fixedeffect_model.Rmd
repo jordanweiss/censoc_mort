@@ -17,7 +17,7 @@ library(rstanarm)
 library(data.table)
 library(StanHeaders)
 library(BayesPostEst)
-source('/hdir/0/mariaosborne/censoc/technical paper stuff/gompertz_functions.R')
+source("../gompertz_functions.R")
 ```
 
 

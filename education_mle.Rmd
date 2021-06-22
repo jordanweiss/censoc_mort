@@ -1,0 +1,223 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Summary: MLE Code 
+
+
+```{r}
+## library packages 
+library(data.table)
+library(tidyverse)
+library(broom) 
+library(socviz)
+library(cowplot)      
+library(ggsci)
+source("gompertz_functions.R")
+```
+
+
+
+```{r}
+## read in prelinked CenSoc datasets and filter to "conservative" matches 
+dmf <- fread("/data/josh/CenSoc/censoc_data/censoc_linked_to_census/censoc_dmf_v2_linked.csv") %>% 
+   filter(link_abe_exact_conservative == 1)
+
+numident <- fread("/data/josh/CenSoc/censoc_data/censoc_linked_to_census/censoc_numident_v2_linked.csv") %>% 
+   filter(link_abe_exact_conservative == 1)
+```
+
+
+
+```{r}
+## function to recode the IPUMS education code to years of educaiton 
+recode_education <- function(df) {
+  df <- df  %>%
+    mutate(educ_yrs = case_when(
+      EDUCD == 2 ~ 0,
+      EDUCD == 14 ~ 1,
+      EDUCD == 15~  2,
+      EDUCD == 16 ~ 3,
+      EDUCD == 17 ~ 4,
+      EDUCD == 22 ~ 5,
+      EDUCD == 23 ~ 6,
+      EDUCD == 25 ~ 7,
+      EDUCD == 26 ~ 8,
+      EDUCD == 30 ~ 9,
+      EDUCD == 40 ~ 10,
+      EDUCD == 50 ~ 11,
+      EDUCD == 60 ~ 12,
+      EDUCD == 70 ~ 13,
+      EDUCD == 80 ~ 14,
+      EDUCD == 90 ~ 15,
+      EDUCD == 100 ~ 16,
+      EDUCD == 111 ~ 17,
+      EDUCD == 112 ~ 17,
+      EDUCD == 113 ~ 17
+    ))
+  return(df)
+}
+
+## recode dmf education variable 
+dmf <- dmf %>% 
+  recode_education() %>% 
+  filter(!is.na(educ_yrs))
+
+## recode numident education variable 
+numident <- numident %>% 
+  recode_education() %>% 
+  filter(!is.na(educ_yrs))
+```
+
+
+Create three different datasets
+
+(1) CenSoc DMF, birth cohorts of 1905-1914
+(2) CenSoc DMF, birth cohorts of 1905-1914 restricted to deaths 1988-2005 (restricted to match CenSoc-Numident)
+(3) CenSoc Numident, birth cohorts of 1905-1914
+
+```{r}
+## create different dmf datasets 
+dmf_select <- dmf %>%  
+  filter(byear %in% 1905:1914) 
+
+## create dmf dataset 
+dmf_select_1988_2005 <- dmf %>%  
+  filter(byear %in% 1905:1914 & dyear %in% 1988:2005) 
+
+## create numident dataset 
+numident_select <- numident %>%  
+  filter(byear %in% 1905:1914 & sex == 1)
+```
+
+```{r}
+## 1. Write the mll function
+
+mll.gomp.multi.cohort.cov <- function(p,  ## as many alphas as cohorts, and 1 beta
+                                      A)  ## data matrix with y, u, l, and covariates, including cohort
+{
+    ## (1) get parameters alpha, beta, and B
+    ## we'll convert later to one element per individual
+    cohorts = names(table(A$cohort))  ## small vector of cohorts, e.g, 1915-1919.
+    k <- length(cohorts)
+    M = exp(p[1:k]); names(M) = cohorts
+    beta = exp(p[k+1]); names(beta) = "beta" ## slope of gompertz
+    ## convert M to alpha
+    alpha = getAlpha(M, beta); names(alpha) = cohorts
+
+    ## new version just has one covariate
+    ## e.g., educ in years
+
+    b = p[length(p)] ## covariate coef is last one
+
+    ## (2) build rate.vec, which has the combined effect of cohort and covariates, 1 element per individual
+    alpha.vec <- alpha[paste(A$cohort)] ## this now has one alpha for each individual
+    ## note: effects are multiplicative of form haz_i = base * exp(covar_i * b)
+    covar_effect.vec <- exp(A$covar * b) ## this gives one covar_effect for each individual
+    if (length(alpha.vec) != length(covar_effect.vec))
+        print("warning: length(alpha.vec) != length(covar_effect.vec)")
+    rate.vec = alpha.vec * covar_effect.vec
+
+    y = A$y
+    u.vec = A$u
+    l.vec = A$l
+
+    ## (3) obtain likelihood Numerator has difference in cumulative
+    ## probabilities, 1 year apart.  This works with data that is
+    ## exact to the year of death like we have in CenSoc.
+    num = pgompertz(y + 1, shape = beta, rate = rate.vec)-
+        pgompertz(y, shape = beta, rate = rate.vec)
+    denom = pgompertz(u.vec, shape = beta, rate = rate.vec)-
+        pgompertz(l.vec, shape = beta, rate = rate.vec)
+    R = num/denom
+    minusloglik = -sum(log(R))
+    return(minusloglik)
+}
+
+
+## 3. Build data matrix A using CenSoc data
+
+mle <- function(df, upper = 2005, lower = 1988){
+
+df <- as.data.table(df)
+A = df[, .(y = death_age,
+              u = upper - byear,
+              l = lower - byear,
+              cohort = byear,
+              covar = educ_yrs)]
+At = A
+
+## check densities
+## ok, it looks like we don't have end-of-interval issues
+cohorts <- sort(unique(df$byear))
+## starting values, just let all the modes be the same ("80"
+M.start = rep(79, length(cohorts))
+names(M.start) = paste0("coh", cohorts)
+
+## and let slope of gompertz start at .1
+## and the effect of 1 year of educ to lower mortality by 10%
+p.start = c("log.of" = log(M.start),
+            "log.beta" = log(.1), 
+            "b" = -.1) ## note we use "b" in original scale, not logged
+
+## run optimizer
+## big fix is making sure maxit is a big number!
+fit = optim(par = p.start, fn = mll.gomp.multi.cohort.cov,
+            A = At,
+            hessian = TRUE,
+            control = list(maxit = 5000))
+## let's get standard errors from Hessian
+hess <- fit$hess
+## fisher_info <- -solve(hess)
+fisher_info <- solve(hess)
+se.vec <- sqrt(diag(fisher_info))
+se.vec
+
+## extract results 
+p = fit$par
+p.upper = p + 2*se.vec
+p.lower = p - 2*se.vec
+hat = c(exp(p[-length(p)]), p[length(p)])
+hat.upper = c(exp(p.upper[-length(p)]), p.upper[length(p)])
+hat.lower = c(exp(p.lower[-length(p)]), p.lower[length(p)])
+out = cbind(hat, hat.lower, hat.upper)
+rownames(out) = c(paste0("coh", cohorts), "beta", "b")
+print(round(out,4))
+
+out = tibble(param = c(paste0("coh", cohorts), "beta", "b"),
+             hat, hat.lower, hat.upper)
+
+return(out)
+
+}
+```
+
+
+
+```{r}
+## set seed for reproducibility 
+set.seed(0.4886)
+
+## make 3 samples 
+dmf_select_sample <- dmf_select %>% 
+  filter(death_age != max(death_age) & death_age != min(death_age)) %>% 
+  sample_n(100000)
+
+dmf_select_1988_2005_sample <- dmf_select_1988_2005 %>% 
+  filter(death_age != max(death_age) & death_age != min(death_age)) %>% 
+  sample_n(100000)
+
+numident_select_sample <- numident_select %>% 
+  filter(death_age != max(death_age) & death_age != min(death_age)) %>% 
+  sample_n(100000)
+
+## carry out mle estimation 
+mle_dmf <- mle(df = dmf_select_sample, lower = 1975, upper = 2005)
+
+mle_dmf_1988_2005 <- mle(df = dmf_select_1988_2005_sample, lower = 1988, upper = 2005)
+
+mle_numident <- mle(df = numident_select_sample, lower = 1988, upper = 2005)
+
+```
+

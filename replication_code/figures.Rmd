@@ -1,0 +1,163 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Summary: Code to replicate figures in CenSoc motality estimation paper. 
+
+
+```{r}
+## library packages 
+library(data.table)
+library(tidyverse)
+library(broom) 
+library(socviz)
+library(cowplot)      
+library(ggsci)
+```
+
+
+
+
+```{r}
+## read in prelinked CenSoc datasets and filter to "conservative" matches 
+dmf <- fread("/data/josh/CenSoc/censoc_data/censoc_linked_to_census/censoc_dmf_v2_linked.csv") %>% 
+   filter(link_abe_exact_conservative == 1)
+
+numident <- fread("/data/josh/CenSoc/censoc_data/censoc_linked_to_census/censoc_numident_v2_linked.csv") %>% 
+   filter(link_abe_exact_conservative == 1)
+```
+
+
+
+
+
+```{r}
+## function to recode the IPUMS education code to years of educaiton 
+recode_education <- function(df) {
+  df <- df  %>%
+    mutate(educ_yrs = case_when(
+      EDUCD == 2 ~ 0,
+      EDUCD == 14 ~ 1,
+      EDUCD == 15~  2,
+      EDUCD == 16 ~ 3,
+      EDUCD == 17 ~ 4,
+      EDUCD == 22 ~ 5,
+      EDUCD == 23 ~ 6,
+      EDUCD == 25 ~ 7,
+      EDUCD == 26 ~ 8,
+      EDUCD == 30 ~ 9,
+      EDUCD == 40 ~ 10,
+      EDUCD == 50 ~ 11,
+      EDUCD == 60 ~ 12,
+      EDUCD == 70 ~ 13,
+      EDUCD == 80 ~ 14,
+      EDUCD == 90 ~ 15,
+      EDUCD == 100 ~ 16,
+      EDUCD == 111 ~ 17,
+      EDUCD == 112 ~ 17,
+      EDUCD == 113 ~ 17
+    ))
+  return(df)
+}
+
+## recode dmf education variable 
+dmf <- dmf %>% 
+  recode_education() %>% 
+  filter(!is.na(educ_yrs))
+
+## recode numident education variable 
+numident <- numident %>% 
+  recode_education() %>% 
+  filter(!is.na(educ_yrs))
+```
+
+
+Create three different datasets
+
+(1) CenSoc DMF, birth cohorts of 1905-1914
+(2) CenSoc DMF, birth cohorts of 1905-1914 restricted to deaths 1988-2005 (restricted to match CenSoc-Numident)
+(3) CenSoc Numident, birth cohorts of 1905-1914
+
+```{r}
+## create different dmf datasets 
+dmf_select <- dmf %>%  
+  filter(byear %in% 1905:1914) 
+
+## create dmf dataset 
+dmf_select_1988_2005 <- dmf %>%  
+  filter(byear %in% 1905:1914 & dyear %in% 1988:2005) 
+
+## create numident dataset 
+numident_select <- numident %>%  
+  filter(byear %in% 1905:1914 & sex == 1)
+```
+
+
+Run OLS regression code 
+
+```{r}
+## run models 
+dmf_select_model <- lm(death_age ~ educ_yrs + as.factor(byear), data = dmf_select)
+dmf_select_1988_2005_model <- lm(death_age ~ educ_yrs + as.factor(byear), data = dmf_select_1988_2005)
+numident_select_model <- lm(death_age ~ educ_yrs + as.factor(byear), data = numident_select)
+
+## put model output into a data.frame 
+dmf_select_model_df <- tidy(dmf_select_model) %>% mutate(data = "DMF (1975-2005)")
+dmf_select_1988_2005_model_df <- tidy(dmf_select_1988_2005_model) %>% mutate(data = "DMF (1988-2005)") 
+numident_select_model_df <- tidy(numident_select_model) %>% mutate(data = "Numident (1988-2005)")
+
+
+## put results into one data.frame 
+results <- bind_rows(dmf_select_model_df, dmf_select_1988_2005_model_df,  numident_select_model_df)
+
+## plot results 
+education_by_dataset <- results %>% 
+  filter(term == "educ_yrs") %>% 
+  ggplot(aes(x = data, 
+             y = estimate, 
+             ymin = estimate - 2*std.error,
+             ymax = estimate + 2*std.error
+             )) + 
+  geom_pointrange(position = position_dodge(width = .75), size = .75, shape=1) +
+  ylim(0, .2) + 
+  theme_cowplot(font_size = 15) +
+  labs(x = "",
+       y = "Regression Coefficient",
+       title = "Association between Education (Years) and Longevity",
+       subtitle = "Men, Birth Cohorts of 1905-1914") + 
+  theme(legend.position = "bottom")
+
+## save plot 
+ggsave(plot = education_by_dataset, filename = "education_X_dataset.png", width = 8, height = 6)
+```
+
+
+## Education Plot 
+
+```{r}
+## dmf education 
+dmf_education <- dmf %>% 
+  filter(byear %in% 1895:1922) %>% 
+  group_by(byear) %>%
+  do(fitHour = tidy(lm(death_age ~ educ_yrs, data = .))) %>% 
+  unnest(fitHour) %>% 
+  mutate(data = "DMF")
+
+education_figure <- dmf_education %>% 
+  filter(term == "educ_yrs") %>% 
+  ggplot(aes(x = byear, y = estimate, ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) + 
+  geom_line() + 
+  geom_pointrange() + 
+  theme_cowplot() + 
+  labs(x = "Birth Cohort",
+       y = "Regression Coefficient",
+       title = "Association between Education (Years) and Longevity",
+       subtitle = "Men Only") + 
+  scale_y_continuous(limits = c(0, .30))
+
+ggsave(plot = education_figure, filename = "education_X_cohort_dmf.png", width = 8, height = 5)
+```
+
+
+
